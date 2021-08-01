@@ -1,6 +1,6 @@
 'use strict';
 
-module.exports = stream => {
+const cloneStream = stream => {
     const chunks = [];
 
     const pushBuffer = chunk => {
@@ -33,3 +33,5 @@ module.exports = stream => {
 
     return chunks;
 };
+
+module.exports = cloneStream;
