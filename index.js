@@ -212,6 +212,7 @@ class HttpCache {
         }
 
         const chunks = cloneStream(stream);
+        // TODO: clear buffer on error
 
         stream.once('end', () => {
             const buffer = Buffer.concat(chunks);
