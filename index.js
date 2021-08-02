@@ -94,7 +94,7 @@ class HttpCache {
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
         this.heuristicFraction = 0.1;
-        this.maxHeuristic = Infinity;
+        this.maxHeuristic = Number.POSITIVE_INFINITY;
     }
 
     async get(url, method) {
