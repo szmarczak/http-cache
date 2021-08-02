@@ -23,9 +23,15 @@ const isSeparator = char => {
             char === '\t';
 };
 
+// TODO: fast parseCacheControl (skips ascii checks etc.)
+
 // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2
 // This parser is very fast: 400k op/s
 const parseCacheControl = cacheControl => {
+    if (!cacheControl) {
+        return {};
+    }
+
     const result = {};
 
     let start = 0;

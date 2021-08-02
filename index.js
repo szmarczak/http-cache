@@ -57,6 +57,8 @@ const isCacheControlAuthorizationOk = (isShared, authorized, responseCacheContro
 
     return  responseCacheControl.includes('public') ||
             responseCacheControl.includes('must-revalidate') ||
+            // Has the same meaning as `must-revalidate` but for shared caches only
+            (isShared && responseCacheControl.includes('proxy-revalidate')) ||
             responseCacheControl.includes('s-maxage');
 };
 
@@ -70,7 +72,7 @@ const isCacheControlOk = (isShared, authorization, requestCacheControl, response
 // https://datatracker.ietf.org/doc/html/rfc7234#section-3
 const isResponseOk = (isShared, statusCode, expires, responseCacheControl) => {
     return  Boolean(expires) ||
-            (isShared && responseCacheControl.includes('max-age')) ||
+            responseCacheControl.includes('max-age') ||
             (isShared && responseCacheControl.includes('s-maxage')) ||
             isHeuristicStatusCode(statusCode) ||
             responseCacheControl.includes('public');
@@ -128,6 +130,16 @@ class HttpCache {
             buffer
         } = await this.cache.get(url);
 
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.7
+        if (!buffer && headers['cache-control']?.includes('only-if-cached')) {
+            return {
+                statusCode: 504,
+                requestHeaders: {},
+                responseHeaders: {},
+                buffer: Buffer.alloc(0)
+            };
+        }
+
         const clonedRequestHeaders = {...requestHeaders};
         const clonedResponseHeaders = {...responseHeaders};
 
@@ -148,6 +160,8 @@ class HttpCache {
             await this.delete(url);
             return undefined;
         }
+
+        // TODO: check cache-control directives
 
         // Warning header has been deprecated, no need to modify it.
 
@@ -199,7 +213,9 @@ class HttpCache {
             return;
         }
 
-        // cache-control
+        const parsedCacheControl = parseCacheControl(responseHeaders['cache-control']);
+
+        // TODO: calculate lifetime using the above
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
         // TODO: only if heuristic
@@ -259,6 +275,8 @@ https.get(url, response => {
         console.log(data.buffer.toString());
     });
 });
+
+// TODO: - invalidation, - validation, - conditional requests, - default stale lifetime, - maximum stale lifetime, - vary
 
 // - same uri
 // - same method
