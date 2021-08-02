@@ -23,12 +23,24 @@ const cloneStream = stream => {
 
     stream.on('newListener', onNewListener);
 
-    stream.on('resume', () => {
+    const onResume = () => {
         stream.on('data', pushBuffer);
-    });
+    };
 
-    stream.on('pause', () => {
+    stream.on('resume', onResume);
+
+    const onPause = () => {
         stream.off('data', pushBuffer);
+    };
+
+    stream.on('pause', onPause);
+
+    stream.once('close', () => {
+        stream.off('newListener', onNewListener);
+        stream.off('removeListener', onRemoveListener);
+        stream.off('data', pushBuffer);
+        stream.off('resume', onResume);
+        stream.off('pause', onPause);
     });
 
     return chunks;
