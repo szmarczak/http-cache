@@ -94,7 +94,7 @@ class HttpCache {
         this.maxHeuristic = Number.POSITIVE_INFINITY;
     }
 
-    async get(url, method) {
+    async get(url, method, headers) {
         if (this.error) {
             const {error} = this;
 
@@ -103,6 +103,16 @@ class HttpCache {
             };
 
             throw error;
+        }
+
+        // TODO: only if not validated
+        if (headers.pragma === 'no-cache') {
+            return;
+        }
+
+        // TODO: only if not validated
+        if (headers['cache-control']?.includes('no-cache')) {
+            return;
         }
 
         const {
@@ -190,9 +200,9 @@ class HttpCache {
         }
 
         // cache-control
-        // pragma
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
+        // TODO: only if heuristic
         if (url.indexOf('?') < url.indexOf('#')) {
             return;
         }
@@ -244,7 +254,7 @@ https.get(url, response => {
     response.resume();
     response.on('end', async () => {
         console.log('got em');
-        const data = await cache.get(url);
+        const data = await cache.get(url, 'GET', {});
         console.log(data);
         console.log(data.buffer.toString());
     });
@@ -255,11 +265,6 @@ https.get(url, response => {
 // - same vary headers
 // - the request does not contain no-cache pragma nor no-cache cache-control unless stored response validated
 // - the stored response does not contain no-cache cache-control unless stored response validated
-
-// When a stored response is used to satisfy a request without
-// validation, a cache MUST generate an Age header field (Section 5.1),
-// replacing any present in the response with a value equal to the
-// stored response's current_age; see Section 4.2.3.
 
 // A cache MUST invalidate the effective Request URI (Section 5.5 of
 //     [RFC7230]) as well as the URI(s) in the Location and Content-Location
