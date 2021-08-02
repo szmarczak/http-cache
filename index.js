@@ -87,25 +87,36 @@ const isCacheable = (isShared, method, authorization, requestCacheControl = '', 
 };
 
 class HttpCache {
-    constructor() {
-        this.cache = new Map();
+    constructor(cache = new Map()) {
+        this.error = undefined;
+        this.cache = cache;
         this.shared = true;
-        
+
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
         this.herusiticFraction = 0.1;
     }
 
     async get(url, method) {
+        if (this.error) {
+            const {error} = this;
+
+            this.get = async () => {
+                throw new Error('The cache has been destroyed. Please recreate the HttpCache instance.');
+            };
+
+            throw error;
+        }
+
         const {
             responseTime,
             dateValue,
             requestTime,
             ageValue,
+            heuristicLifetime,
 
             statusCode,
             requestHeaders,
             responseHeaders,
-            heuristicExpirationTime,
             buffer
         } = await this.cache.get(url);
 
@@ -113,16 +124,22 @@ class HttpCache {
         const clonedResponseHeaders = {...responseHeaders};
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
+        const now = Date.now();
         const apparentAge = Math.max(0, responseTime - dateValue);
         const responseDelay = responseTime - requestTime;
         const correctedAgeValue = ageValue + responseDelay;
         const correctedInitialAge = Math.max(apparentAge, correctedAgeValue);
-        const residentTime = Date.now() - responseTime;
+        const residentTime = now - responseTime;
         const currentAge = correctedInitialAge + residentTime;
 
         // It must be ceil, otherwise 0 means it wasn't able to calculate this
         const age = Math.ceil(currentAge / 1000);
         clonedResponseHeaders.age = String(age);
+
+        if (age > heuristicLifetime) {
+            await this.delete(url);
+            return undefined;
+        }
 
         // Warning header has been deprecated, no need to modify it.
 
@@ -130,13 +147,20 @@ class HttpCache {
             statusCode,
             requestHeaders: clonedRequestHeaders,
             responseHeaders: clonedResponseHeaders,
-            heuristicExpirationTime,
             buffer: Buffer.from(buffer)
         };
     }
 
-    async set() {
+    async delete(url) {
+        return this.cache.delete(url);
+    }
 
+    async clear() {
+        return this.cache.clear();
+    }
+
+    async set(url, value) {
+        return this.cache.set(url, value);
     }
 
     process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
@@ -174,8 +198,6 @@ class HttpCache {
         }
 
         const now = Date.now();
-        const herusiticTimeToLive = (now - Date.parse(responseHeaders['last-modified'])) * this.herusiticFraction;
-        const heuristicExpirationTime = now + herusiticTimeToLive;
 
         const chunks = cloneStream(stream);
 
@@ -183,22 +205,26 @@ class HttpCache {
             chunks.length = 0;
         });
 
-        stream.once('end', () => {
+        stream.once('end', async () => {
             const buffer = Buffer.concat(chunks);
             chunks.length = 0;
 
-            this.cache.set(url, {
-                responseTime: now,
-                dateValue: Date.parse(responseHeaders.date),
-                requestTime,
-                ageValue: Number(responseHeaders.age) || 0,
-
-                statusCode,
-                requestHeaders,
-                responseHeaders,
-                heuristicExpirationTime,
-                buffer
-            });
+            try {
+                await this.set(url, {
+                    responseTime: now,
+                    dateValue: Date.parse(responseHeaders.date),
+                    requestTime,
+                    ageValue: Number(responseHeaders.age) || 0,
+                    heuristicLifetime: (now - Date.parse(responseHeaders['last-modified'])) * this.herusiticFraction,
+    
+                    statusCode,
+                    requestHeaders,
+                    responseHeaders,
+                    buffer
+                });
+            } catch (error) {
+                this.error = error;
+            }
         });
     }
 }
@@ -216,7 +242,6 @@ https.get(url, response => {
         console.log('got em');
         const data = await cache.get(url);
         console.log(data);
-        console.log(new Date(data.heuristicExpirationTime));
         console.log(data.buffer.toString());
     });
 });
