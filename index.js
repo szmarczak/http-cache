@@ -80,6 +80,9 @@ class HttpCache {
     constructor() {
         this.cache = new Map();
         this.shared = true;
+        
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
+        this.herusiticFraction = 0.1;
     }
 
     async get(url, method) {
@@ -92,7 +95,7 @@ class HttpCache {
 
     process(url, method, headers, statusCode, responseHeaders, stream) {
         // TODO: do not process the same requests at the same moment
-        
+
         const cacheable = isCacheable(
             this.shared,
             method,
@@ -107,6 +110,20 @@ class HttpCache {
             return;
         }
 
+        // cache-control
+        // pragma
+
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
+        if (url.includes('?')) {
+            return;
+        }
+
+        if (!responseHeaders['last-modified']) {
+            return;
+        }
+
+        const heuristicExpirationTime = (Date.now() - Date.parse(responseHeaders['last-modified'])) * this.herusiticFraction;
+
         const chunks = cloneStream(stream);
 
         stream.once('close', () => {
@@ -117,7 +134,10 @@ class HttpCache {
             const buffer = Buffer.concat(chunks);
             chunks.length = 0;
 
-            this.cache.set(url, buffer);
+            this.cache.set(url, {
+                heuristicExpirationTime,
+                buffer
+            });
         });
     }
 }
@@ -125,15 +145,15 @@ class HttpCache {
 const cache = new HttpCache();
 
 const https = require('https');
-const url = 'https://httpbin.org/anything'
+const url = 'https://szmarczak.com/foobar.txt';
 https.get(url, response => {
     cache.process(url, 'GET', {}, response.statusCode, response.headers, response);
 
     response.resume();
     response.on('end', async () => {
         console.log('got em');
-        const buffer = await cache.get(url);
-        console.log(buffer.toString());
+        const data = await cache.get(url);
+        console.log(data.buffer.toString());
     });
 });
 
