@@ -43,9 +43,6 @@ const getDate = (date, requestTime) => {
     return new Date().toUTCString();
 };
 
-// https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.4
-const isVaryOk = vary => vary !== '*';
-
 // https://datatracker.ietf.org/doc/html/rfc7234#section-3.2
 // must-revalidate and s-maxage cannot be served stale
 // "max-age=0, must-revalidate" or "s-maxage=0" must be validated
@@ -166,6 +163,12 @@ class HttpCache {
 
     process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
         // TODO: do not process the same requests at the same moment
+
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
+        // A Vary header field-value of "*" always fails to match.
+        if (responseHeaders.vary === '*') {
+            return;
+        }
 
         requestHeaders = {...requestHeaders};
         responseHeaders = {...responseHeaders};
