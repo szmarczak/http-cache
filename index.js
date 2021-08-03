@@ -135,7 +135,7 @@ class HttpCache {
             dateValue,
             requestTime,
             ageValue,
-            heuristicLifetime,
+            lifetime,
 
             statusCode,
             requestHeaders,
@@ -169,7 +169,7 @@ class HttpCache {
         const age = Math.ceil(currentAge / 1000);
         clonedResponseHeaders.age = String(age);
 
-        if (age > heuristicLifetime) {
+        if (age > lifetime) {
             await this.delete(url);
             return undefined;
         }
@@ -228,19 +228,43 @@ class HttpCache {
 
         const parsedCacheControl = parseCacheControl(responseHeaders['cache-control']);
 
-        // TODO: calculate lifetime using the above
+        let lifetime = 0;
+        let heuristic = true;
 
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
-        // TODO: only if heuristic
-        if (url.indexOf('?') < url.indexOf('#')) {
-            return;
+        if (this.shared && parsedCacheControl['s-maxage']) {
+            lifetime = Number(parsedCacheControl['s-maxage']) || 0;
         }
 
-        if (!responseHeaders['last-modified']) {
-            return;
+        if (lifetime === 0 && parsedCacheControl['max-age']) {
+            lifetime = Number(parsedCacheControl['max-age']) || 0;
         }
 
-        const now = Date.now();
+        if (lifetime === 0 && responseHeaders.expires) {
+            const parsed = Date.parse(responseHeaders.expires);
+
+            if (parsed) {
+                lifetime = Date.now() - parsed;
+            }
+        }
+
+        let now;
+
+        if (lifetime !== 0) {
+            heuristic = false;
+            now = Date.now();
+        } else {
+            // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
+            if (url.indexOf('?') < url.indexOf('#')) {
+                return;
+            }
+
+            if (!responseHeaders['last-modified']) {
+                return;
+            }
+
+            now = Date.now();
+            lifetime = Math.min(this.maxHeuristic, (now - Date.parse(responseHeaders['last-modified'])) * this.heuristicFraction);
+        }
 
         const chunks = cloneStream(stream);
 
@@ -258,8 +282,9 @@ class HttpCache {
                     dateValue: Date.parse(responseHeaders.date),
                     requestTime,
                     ageValue: Number(responseHeaders.age) || 0,
-                    heuristicLifetime: Math.min(this.maxHeuristic, (now - Date.parse(responseHeaders['last-modified'])) * this.heuristicFraction),
-    
+                    lifetime,
+                    heuristic,
+
                     statusCode,
                     requestHeaders,
                     responseHeaders,
