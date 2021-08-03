@@ -1,32 +1,6 @@
 'use strict';
 
-// https://datatracker.ietf.org/doc/html/rfc2616#section-2.2
-const isSeparator = char => {
-    return  char === '(' ||
-            char === ')' ||
-            char === '<' ||
-            char === '>' ||
-            char === '@' ||
-            char === ',' ||
-            char === ';' ||
-            char === ':' ||
-            char === '\\' ||
-            char === '"' ||
-            char === '/' ||
-            char === '[' ||
-            char === ']' ||
-            char === '?' ||
-            char === '=' ||
-            char === '{' ||
-            char === '}' ||
-            char === ' ' ||
-            char === '\t';
-};
-
-// TODO: fast parseCacheControl (skips ascii checks etc.)
-
-// https://datatracker.ietf.org/doc/html/rfc7234#section-5.2
-// This parser is very fast: 400k op/s
+// 2M op/s
 const parseCacheControl = cacheControl => {
     if (!cacheControl) {
         return {};
@@ -34,78 +8,23 @@ const parseCacheControl = cacheControl => {
 
     const result = {};
 
-    let start = 0;
-    let current = -1;
-    let key = '';
-    let value = '';
-    let isQuotedString;
-    let isBackslash = false;
+    const parts = cacheControl.split(',');
 
-    while (current < cacheControl.length) {
-        current++;
-
-        const char = cacheControl[current];
-        if (char < ' ' || char > '~') {
-            throw new Error(`Invalid ASCII character: ${char.charCodeAt(0)}`);
+    for (const part of parts) {
+        if (part === '') {
+            continue;
         }
 
-        if (isQuotedString) {
-            if (isBackslash) {
-                isBackslash = false;
-                continue;
-            } else if (char === '\\') {
-                value += cacheControl.slice(start, current);
-                start = current + 1;
+        const delimiterIndex = part.indexOf('=');
 
-                isBackslash = true;
-                continue;
-            }
-        }
-
-        if (char === ',') {
-            if (isQuotedString) {
-                continue;
-            }
-
-            result[key] = value;
-            value = '';
-            key = '';
-            current++;
-
-            if (cacheControl[current] === '\r' && cacheControl[current + 1] === '\n') {
-                current += 2;
-            }
-
-            while (cacheControl[current] === ' ' || cacheControl[current] === '\t') {
-                current++;
-            }
-
-            start = current;
-        } else if (char === '=') {
-            key += cacheControl.slice(start, current);
-            start = current + 1;
-        } else if (char === '"') {
-            if (isQuotedString) {
-                value += cacheControl.slice(start, current);
-                start = current + 1;
-                isQuotedString = false;
-            } else {
-                start++;
-                isQuotedString = true;
-            }
-        } else if (isSeparator(char)) {
-            throw new Error(`Invalid token character: ${char.charCodeAt(0)}`);
-        }
-    }
-
-    if (key && value === '') {
-        if (start !== cacheControl.length) {
-            result[key] = cacheControl.slice(start, current);
+        if (delimiterIndex === -1) {
+            result[part.trimStart()] = '';
         } else {
-            throw new Error(`Unexpected key without value: ${key}`);
+            const key = part.slice(0, delimiterIndex).trimStart();
+            const value = part.slice(delimiterIndex + 1);
+
+            result[key] = value[0] === '"' ? value.slice(1, -1) : value;
         }
-    } else if (start !== cacheControl.length) {
-        result[cacheControl.slice(start, current)] = '';
     }
 
     return result;
