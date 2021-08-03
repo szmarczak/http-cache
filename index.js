@@ -4,6 +4,7 @@ const parseCacheControl = require('./parse-cache-control');
 
 const {on} = EventEmitter.prototype;
 
+// Big thanks to @ronag - https://github.com/nodejs/node/issues/39632#issuecomment-891739612
 const cloneStream = stream => {
     const chunks = [];
 
