@@ -1,6 +1,18 @@
 'use strict';
-const cloneStream = require('./clone-stream');
+const {EventEmitter} = require('events');
 const parseCacheControl = require('./parse-cache-control');
+
+const {on} = EventEmitter.prototype;
+
+const cloneStream = stream => {
+    const chunks = [];
+
+    on.call(stream, 'data', chunk => {
+       chunks.push(chunk);
+    });
+
+    return chunks;
+};
 
 // https://datatracker.ietf.org/doc/html/rfc7231#section-4.2.3
 const isMethodCacheable = method => {
