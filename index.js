@@ -22,6 +22,14 @@ const isMethodCacheable = method => {
     return method === 'GET' || method === 'HEAD' || method === 'POST';
 };
 
+// https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
+const isMethodUnsafe = method => {
+    return  method !== 'GET' &&
+            method !== 'HEAD' &&
+            method !== 'OPTIONS' &&
+            method !== 'TRACE';
+};
+
 // https://datatracker.ietf.org/doc/html/rfc7231#section-6.1
 // 206 is hard, see https://datatracker.ietf.org/doc/html/rfc7234#section-3.1
 const isHeuristicStatusCode = statusCode => {
@@ -109,6 +117,7 @@ class HttpCache {
         this.maxHeuristic = Number.POSITIVE_INFINITY;
 
         this.processing = new Set();
+        // this.removeOnInvalidation = true;
     }
 
     async get(url, method, headers) {
@@ -208,7 +217,42 @@ class HttpCache {
         };
     }
 
-    process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
+    async _invalidate(url) {
+        await Promise.all([
+            this.cache.delete(`GET:${url}`),
+            this.cache.delete(`HEAD:${url}`),
+            this.cache.delete(`POST:${url}`),
+
+            this.cache.delete(`buffer:GET:${url}`),
+            this.cache.delete(`buffer:HEAD:${url}`),
+            this.cache.delete(`buffer:POST:${url}`)
+        ]);
+    }
+
+    async process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
+        if (isMethodUnsafe(method) && statusCode >= 200 && statusCode < 400) {
+            const {location, 'content-location': contentLocation} = responseHeaders;
+
+            try {
+                await Promise.all([
+                    this._invalidate(url),
+                    location ? this._invalidate(location) : true,
+                    contentLocation ? this._invalidate(contentLocation) : true
+                ]);
+            } catch (error) {
+                this.error = error;
+                return;
+            }
+
+            // However, a cache MUST NOT invalidate a URI from a Location or
+            // Content-Location response header field if the host part of that URI
+            // differs from the host part in the effective request URI (Section 5.5
+            // of [RFC7230]).  This helps prevent denial-of-service attacks.
+            //
+            // @szmarczak: No, I don't trust this paragraph. Makes no sense.
+        }
+
         const cacheable = isCacheable(
             this.shared,
             method,
@@ -309,6 +353,7 @@ class HttpCache {
             chunks.length = 0;
 
             try {
+                // Do NOT use Promise.all(...) here.
                 await this.cache.set(key, {
                     responseTime: now,
                     dateValue: Date.parse(responseHeaders.date),
@@ -350,18 +395,4 @@ https.get(url, response => {
     });
 });
 
-// TODO: - invalidation, - conditional requests,
-
-// A cache MUST invalidate the effective Request URI (Section 5.5 of
-//     [RFC7230]) as well as the URI(s) in the Location and Content-Location
-//     response header fields (if present) when a non-error status code is
-//     received in response to an unsafe request method.
-
-// However, a cache MUST NOT invalidate a URI from a Location or
-// Content-Location response header field if the host part of that URI
-// differs from the host part in the effective request URI (Section 5.5
-// of [RFC7230]).  This helps prevent denial-of-service attacks.
-
-// A cache MUST invalidate the effective request URI (Section 5.5 of
-//     [RFC7230]) when it receives a non-error response to a request with a
-//     method whose safety is unknown.
+// TODO: - conditional requests,
