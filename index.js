@@ -122,6 +122,19 @@ class HttpCache {
             throw error;
         }
 
+        const key = `${method}:${url}`;
+
+        const data = await this.cache.get(key);
+
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.7
+        if (!data && headers['cache-control']?.includes('only-if-cached')) {
+            return {
+                statusCode: 504,
+                responseHeaders: {},
+                buffer: Buffer.alloc(0)
+            };
+        }
+
         const {
             responseTime,
             dateValue,
@@ -131,24 +144,14 @@ class HttpCache {
 
             statusCode,
             responseHeaders,
-            buffer,
 
             vary,
             alwaysRevalidate,
             revalidateOnStale
-        } = await this.cache.get(url);
+        } = data;
 
         if (alwaysRevalidate) {
             // TODO: revalidate
-        }
-
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.7
-        if (!buffer && headers['cache-control']?.includes('only-if-cached')) {
-            return {
-                statusCode: 504,
-                responseHeaders: {},
-                buffer: Buffer.alloc(0)
-            };
         }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
@@ -157,8 +160,6 @@ class HttpCache {
                 return;
             }
         }
-
-        const clonedResponseHeaders = {...responseHeaders};
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
         const now = Date.now();
@@ -171,40 +172,40 @@ class HttpCache {
 
         // It must be ceil, otherwise 0 means it wasn't able to calculate this
         const age = Math.ceil(currentAge / 1000);
-        clonedResponseHeaders.age = String(age);
+        responseHeaders.age = String(age);
 
         if (age > lifetime) {
             if (revalidateOnStale) {
                 try {
                     // TODO: revalidate
                 } catch {
-                    // TODO: Throw 504 Gateway Timeout
+                    return {
+                        statusCode: 504,
+                        responseHeaders: {},
+                        buffer: Buffer.alloc(0)
+                    };
                 }
             }
 
-            await this.delete(url);
+            await this.cache.delete(key);
+            await this.cache.delete(`buffer:${key}`);
+            return undefined;
+        }
+
+        const buffer = await this.cache.get(`buffer:${key}`);
+
+        if (!buffer) {
+            // Cache error, remove the entry.
+            await this.cache.delete(key);
             return undefined;
         }
 
         // Warning header has been deprecated, no need to modify it.
-
         return {
             statusCode,
-            responseHeaders: clonedResponseHeaders,
-            buffer: Buffer.from(buffer)
+            responseHeaders: {...responseHeaders},
+            buffer
         };
-    }
-
-    async delete(url) {
-        return this.cache.delete(url);
-    }
-
-    async clear() {
-        return this.cache.clear();
-    }
-
-    async set(url, value) {
-        return this.cache.set(url, value);
     }
 
     process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
@@ -308,7 +309,7 @@ class HttpCache {
             chunks.length = 0;
 
             try {
-                await this.set(url, {
+                await this.cache.set(key, {
                     responseTime: now,
                     dateValue: Date.parse(responseHeaders.date),
                     requestTime,
@@ -318,12 +319,13 @@ class HttpCache {
 
                     statusCode,
                     responseHeaders,
-                    buffer,
 
                     vary,
                     alwaysRevalidate: 'no-cache' in parsedCacheControl,
                     revalidateOnStale: ('must-revalidate' in parseCacheControl) || (this.shared && 'proxy-revalidate')
                 });
+
+                await this.cache.set(`buffer:${key}`, buffer);
             } catch (error) {
                 this.error = error;
             }
