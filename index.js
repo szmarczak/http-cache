@@ -107,6 +107,8 @@ class HttpCache {
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
         this.heuristicFraction = 0.1;
         this.maxHeuristic = Number.POSITIVE_INFINITY;
+
+        this.processing = new Set();
     }
 
     async get(url, method, headers) {
@@ -128,7 +130,6 @@ class HttpCache {
             lifetime,
 
             statusCode,
-            requestHeaders,
             responseHeaders,
             buffer,
 
@@ -145,22 +146,18 @@ class HttpCache {
         if (!buffer && headers['cache-control']?.includes('only-if-cached')) {
             return {
                 statusCode: 504,
-                requestHeaders: {},
                 responseHeaders: {},
                 buffer: Buffer.alloc(0)
             };
         }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
-        if (vary) {
-            for (const header of vary) {
-                if (headers[header] !== requestHeaders[header]) {
-                    return;
-                }
+        for (const [header, value] of Object.entries(vary)) {
+            if (value !== headers[header]) {
+                return;
             }
         }
 
-        const clonedRequestHeaders = {...requestHeaders};
         const clonedResponseHeaders = {...responseHeaders};
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
@@ -193,7 +190,6 @@ class HttpCache {
 
         return {
             statusCode,
-            requestHeaders: clonedRequestHeaders,
             responseHeaders: clonedResponseHeaders,
             buffer: Buffer.from(buffer)
         };
@@ -212,24 +208,6 @@ class HttpCache {
     }
 
     process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
-        // TODO: do not process the same requests at the same moment
-
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
-        // A Vary header field-value of "*" always fails to match.
-        if (responseHeaders.vary === '*') {
-            return;
-        }
-
-        let vary;
-        if (responseHeaders.vary) {
-            vary = responseHeaders.vary.split(',').map(header => header.toLowerCase().trim());
-        }
-
-        requestHeaders = {...requestHeaders};
-        responseHeaders = {...responseHeaders};
-
-        responseHeaders.date = getDate(responseHeaders.date, requestTime);
-
         const cacheable = isCacheable(
             this.shared,
             method,
@@ -244,6 +222,37 @@ class HttpCache {
             return;
         }
 
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
+        // A Vary header field-value of "*" always fails to match.
+        if (responseHeaders.vary === '*') {
+            return;
+        }
+
+        // We don't want to process the same request multiple times.
+        // The RFC says nothing about this but it would make no sense
+        // to download megabytes of data and bottleneck the cache.
+        const key = `${method}:${url}`;
+        if (this.processing.has(key)) {
+            return;
+        }
+
+        // We need to clone only those request headers we really need
+        let vary = {};
+        if (responseHeaders.vary) {
+            const varyHeaders = responseHeaders.vary.split(',').map(header => header.toLowerCase().trim());
+            
+            for (const header of varyHeaders) {
+                vary[header] = requestHeaders[header];
+            }
+        }
+
+        // We need to clone all the response headers
+        responseHeaders = {...responseHeaders};
+
+        // Fix the date
+        responseHeaders.date = getDate(responseHeaders.date, requestTime);
+
+        // Parse lifetime
         const parsedCacheControl = parseCacheControl(responseHeaders['cache-control']);
 
         let lifetime = 0;
@@ -284,10 +293,14 @@ class HttpCache {
             lifetime = Math.min(this.maxHeuristic, (now - Date.parse(responseHeaders['last-modified'])) * this.heuristicFraction);
         }
 
+        // Let the processing begin
+        this.processing.add(key);
         const chunks = cloneStream(stream);
 
         stream.once('close', () => {
             chunks.length = 0;
+
+            this.processing.delete(key);
         });
 
         stream.once('end', async () => {
@@ -304,7 +317,6 @@ class HttpCache {
                     heuristic,
 
                     statusCode,
-                    requestHeaders,
                     responseHeaders,
                     buffer,
 
