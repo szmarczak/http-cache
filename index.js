@@ -218,6 +218,14 @@ class HttpCache {
     }
 
     async _invalidate(url) {
+        // TODO:
+        // This is not proper invalidation.
+        // Proper invalidation is this:
+        // assume |url|:|method1,method2|
+        // delete |method1:url| |method2:url|
+        // delete |buffer:method1:url| |buffer:method2:url|
+        // delete |url|
+
         await Promise.all([
             this.cache.delete(`GET:${url}`),
             this.cache.delete(`HEAD:${url}`),
