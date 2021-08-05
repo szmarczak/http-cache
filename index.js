@@ -338,12 +338,6 @@ https.get(url, response => {
 
 // TODO: - invalidation, - conditional requests,
 
-// - same uri
-// - same method
-// - same vary headers
-// - the request does not contain no-cache pragma nor no-cache cache-control unless stored response validated
-// - the stored response does not contain no-cache cache-control unless stored response validated
-
 // A cache MUST invalidate the effective Request URI (Section 5.5 of
 //     [RFC7230]) as well as the URI(s) in the Location and Content-Location
 //     response header fields (if present) when a non-error status code is
