@@ -310,7 +310,7 @@ class HttpCache {
 
                     vary,
                     alwaysRevalidate: 'no-cache' in parsedCacheControl,
-                    revalidateOnStale: ('must-revalidate' in parseCacheControl) || (isShared && 'proxy-revalidate')
+                    revalidateOnStale: ('must-revalidate' in parseCacheControl) || (this.shared && 'proxy-revalidate')
                 });
             } catch (error) {
                 this.error = error;
