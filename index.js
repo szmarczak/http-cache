@@ -237,21 +237,22 @@ class HttpCache {
         ]);
     }
 
-    async process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
+    process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
         if (isMethodUnsafe(method) && statusCode >= 200 && statusCode < 400) {
             const {location, 'content-location': contentLocation} = responseHeaders;
 
-            try {
-                await Promise.all([
-                    this._invalidate(url),
-                    location ? this._invalidate(location) : true,
-                    contentLocation ? this._invalidate(contentLocation) : true
-                ]);
-            } catch (error) {
-                this.error = error;
-                return;
-            }
+            (async () => {
+                try {
+                    await Promise.all([
+                        this._invalidate(url),
+                        location ? this._invalidate(location) : true,
+                        contentLocation ? this._invalidate(contentLocation) : true
+                    ]);
+                } catch (error) {
+                    this.error = error;
+                }
+            })();
 
             // However, a cache MUST NOT invalidate a URI from a Location or
             // Content-Location response header field if the host part of that URI
