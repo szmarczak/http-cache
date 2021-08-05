@@ -120,16 +120,6 @@ class HttpCache {
             throw error;
         }
 
-        // TODO: only if not validated
-        if (headers.pragma === 'no-cache') {
-            return;
-        }
-
-        // TODO: only if not validated
-        if (headers['cache-control']?.includes('no-cache')) {
-            return;
-        }
-
         const {
             responseTime,
             dateValue,
@@ -140,8 +130,16 @@ class HttpCache {
             statusCode,
             requestHeaders,
             responseHeaders,
-            buffer
+            buffer,
+
+            vary,
+            alwaysRevalidate,
+            revalidateOnStale
         } = await this.cache.get(url);
+
+        if (alwaysRevalidate) {
+            // TODO: revalidate
+        }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.7
         if (!buffer && headers['cache-control']?.includes('only-if-cached')) {
@@ -151,6 +149,15 @@ class HttpCache {
                 responseHeaders: {},
                 buffer: Buffer.alloc(0)
             };
+        }
+
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
+        if (vary) {
+            for (const header of vary) {
+                if (headers[header] !== requestHeaders[header]) {
+                    return;
+                }
+            }
         }
 
         const clonedRequestHeaders = {...requestHeaders};
@@ -170,11 +177,17 @@ class HttpCache {
         clonedResponseHeaders.age = String(age);
 
         if (age > lifetime) {
+            if (revalidateOnStale) {
+                try {
+                    // TODO: revalidate
+                } catch {
+                    // TODO: Throw 504 Gateway Timeout
+                }
+            }
+
             await this.delete(url);
             return undefined;
         }
-
-        // TODO: check cache-control directives
 
         // Warning header has been deprecated, no need to modify it.
 
@@ -205,6 +218,11 @@ class HttpCache {
         // A Vary header field-value of "*" always fails to match.
         if (responseHeaders.vary === '*') {
             return;
+        }
+
+        let vary;
+        if (responseHeaders.vary) {
+            vary = responseHeaders.vary.split(',').map(header => header.toLowerCase().trim());
         }
 
         requestHeaders = {...requestHeaders};
@@ -288,7 +306,11 @@ class HttpCache {
                     statusCode,
                     requestHeaders,
                     responseHeaders,
-                    buffer
+                    buffer,
+
+                    vary,
+                    alwaysRevalidate: 'no-cache' in parsedCacheControl,
+                    revalidateOnStale: ('must-revalidate' in parseCacheControl) || (isShared && 'proxy-revalidate')
                 });
             } catch (error) {
                 this.error = error;
@@ -314,7 +336,7 @@ https.get(url, response => {
     });
 });
 
-// TODO: - invalidation, - validation, - conditional requests, - default stale lifetime, - maximum stale lifetime, - vary
+// TODO: - invalidation, - conditional requests,
 
 // - same uri
 // - same method
