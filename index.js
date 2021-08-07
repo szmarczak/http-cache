@@ -24,6 +24,8 @@ const isMethodCacheable = method => {
 
 // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
 const isMethodUnsafe = method => {
+    method = method.toUpperCase();
+
     return  method !== 'GET' &&
             method !== 'HEAD' &&
             method !== 'OPTIONS' &&
@@ -136,7 +138,7 @@ class HttpCache {
         const data = await this.cache.get(key);
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.7
-        if (!data && headers['cache-control']?.includes('only-if-cached')) {
+        if ((!data || data.alwaysRevalidate) && headers['cache-control']?.includes('only-if-cached')) {
             return {
                 statusCode: 504,
                 responseHeaders: {},
@@ -226,7 +228,7 @@ class HttpCache {
         // delete |buffer:method1:url| |buffer:method2:url|
         // delete |url|
 
-        await Promise.all([
+        return Promise.all([
             this.cache.delete(`GET:${url}`),
             this.cache.delete(`HEAD:${url}`),
             this.cache.delete(`POST:${url}`),
