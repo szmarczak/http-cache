@@ -345,7 +345,9 @@ class HttpCache {
             }
         } else {
             // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
-            if (url.indexOf('?') < url.indexOf('#')) {
+            const hashIndex = url.indexOf('#');
+            const queryIndex = url.indexOf('?');
+            if (hashIndex === -1 ? queryIndex !== -1 : queryIndex < hashIndex) {
                 return;
             }
 
