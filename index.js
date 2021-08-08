@@ -17,15 +17,11 @@ const cloneStream = stream => {
 
 // https://datatracker.ietf.org/doc/html/rfc7231#section-4.2.3
 const isMethodCacheable = method => {
-    method = method.toUpperCase();
-
     return method === 'GET' || method === 'HEAD' || method === 'POST';
 };
 
 // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
 const isMethodUnsafe = method => {
-    method = method.toUpperCase();
-
     return  method !== 'GET' &&
             method !== 'HEAD' &&
             method !== 'OPTIONS' &&
@@ -135,13 +131,14 @@ class HttpCache {
             throw error;
         }
 
+        method = method.toUpperCase();
         const key = `${method}:${url}`;
 
         const data = await this.cache.get(key);
         const parsedCacheControl = parseCacheControl(headers['cache-control']);
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.7
-        if ((!data || data.alwaysRevalidate) && 'only-if-cached' in parsedCacheControl) {
+        if ((!data || data.alwaysRevalidate) && parsedCacheControl['only-if-cached'] === '') {
             return {
                 statusCode: 504,
                 responseHeaders: {},
@@ -151,9 +148,7 @@ class HttpCache {
 
         const {
             responseTime,
-            dateValue,
-            requestTime,
-            ageValue,
+            correctedInitialAge,
             lifetime,
 
             statusCode,
@@ -164,7 +159,7 @@ class HttpCache {
             revalidateOnStale
         } = data;
 
-        if (alwaysRevalidate || 'no-cache' in parsedCacheControl) {
+        if (alwaysRevalidate || parsedCacheControl['no-cache'] === '') {
             // TODO: revalidate
         }
 
@@ -177,10 +172,6 @@ class HttpCache {
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
         const now = Date.now();
-        const apparentAge = Math.max(0, responseTime - dateValue);
-        const responseDelay = responseTime - requestTime;
-        const correctedAgeValue = ageValue + responseDelay;
-        const correctedInitialAge = Math.max(apparentAge, correctedAgeValue);
         const residentTime = now - responseTime;
         const currentAge = correctedInitialAge + residentTime;
 
@@ -251,6 +242,8 @@ class HttpCache {
     }
 
     process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
+        method = method.toUpperCase();
+
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
         if (isMethodUnsafe(method) && statusCode >= 200 && statusCode < 400) {
             const {location, 'content-location': contentLocation} = responseHeaders;
@@ -333,19 +326,23 @@ class HttpCache {
             lifetime = Number(parsedCacheControl['max-age']) || 0;
         }
 
+        let now;
+
         if (lifetime === 0 && responseHeaders.expires) {
             const parsed = Date.parse(responseHeaders.expires);
 
             if (parsed) {
-                lifetime = Date.now() - parsed;
+                now = Date.now();
+                lifetime = now - parsed;
             }
         }
 
-        let now;
-
         if (lifetime !== 0) {
             heuristic = false;
-            now = Date.now();
+
+            if (!now) {
+                now = Date.now();
+            }
         } else {
             // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
             if (url.indexOf('?') < url.indexOf('#')) {
@@ -356,9 +353,27 @@ class HttpCache {
                 return;
             }
 
-            now = Date.now();
-            lifetime = Math.min(this.maxHeuristic, (now - Date.parse(responseHeaders['last-modified'])) * this.heuristicFraction);
+            const parsed = Date.parse(responseHeaders['last-modified']);
+
+            if (!parsed) {
+                return;
+            }
+
+            if (!now) {
+                now = Date.now();
+            }
+
+            lifetime = Math.min(this.maxHeuristic, (now - parsed) * this.heuristicFraction);
         }
+
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
+        const dateValue = Date.parse(responseHeaders.date);
+        const responseTime = now;
+        const apparentAge = Math.max(0, responseTime - dateValue);
+        const responseDelay = responseTime - requestTime;
+        const ageValue = Number(responseHeaders.age) || 0;
+        const correctedAgeValue = ageValue + responseDelay;
+        const correctedInitialAge = Math.max(apparentAge, correctedAgeValue);
 
         // Let the processing begin
         this.processing.add(key);
@@ -377,10 +392,8 @@ class HttpCache {
             try {
                 // Do NOT use Promise.all(...) here.
                 await this.cache.set(key, {
-                    responseTime: now,
-                    dateValue: Date.parse(responseHeaders.date),
-                    requestTime,
-                    ageValue: Number(responseHeaders.age) || 0,
+                    responseTime,
+                    correctedInitialAge,
                     lifetime,
                     heuristic,
 
@@ -388,8 +401,8 @@ class HttpCache {
                     responseHeaders,
 
                     vary,
-                    alwaysRevalidate: 'no-cache' in parsedCacheControl,
-                    revalidateOnStale: ('must-revalidate' in parsedCacheControl) || (this.shared && 'proxy-revalidate' in parsedCacheControl)
+                    alwaysRevalidate: parsedCacheControl['no-cache'] === '',
+                    revalidateOnStale: parsedCacheControl['must-revalidate'] === 'must-revalidate' || (this.shared && parsedCacheControl['proxy-revalidate'] === '')
                 });
 
                 await this.cache.set(`buffer:${key}`, buffer);
