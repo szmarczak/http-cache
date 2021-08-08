@@ -119,15 +119,12 @@ class HttpCache {
         this.removeOnInvalidation = true;
     }
 
-    _setRevalidationHeaders(headers, responseHeaders) {
-        headers['if-modified-since'] = responseHeaders.date;
+    _setRevalidationHeaders(headers, date, etag) {
+        headers['if-modified-since'] = date;
 
-        const {etag} = responseHeaders;
         if (etag) {
             headers['if-none-match'] = etag;
         }
-
-        return headers;
     }
 
     async get(url, method, headers) {
@@ -141,14 +138,12 @@ class HttpCache {
             throw error;
         }
 
-        method = method.toUpperCase();
-        const key = `${method}:${url}`;
-
         const data = await this.cache.get(url);
+
         const parsedCacheControl = parseCacheControl(headers['cache-control']);
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.7
-        if ((!data || data.alwaysRevalidate) && parsedCacheControl['only-if-cached'] === '') {
+        if ((!data || data.alwaysRevalidate || data.invalidated) && parsedCacheControl['only-if-cached'] === '') {
             return {
                 statusCode: 504,
                 responseHeaders: {},
@@ -156,9 +151,13 @@ class HttpCache {
             };
         }
 
+        if (data.method !== method) {
+            return;
+        }
+
         if (data.alwaysRevalidate || parsedCacheControl['no-cache'] === '' || data.invalidated) {
-            // this._setRevalidationHeaders(headers, responseHeaders);
-            // return this._continue.bind(this, key, data);
+            this._setRevalidationHeaders(headers, responseHeaders);
+            return;
         }
 
         const {
@@ -194,8 +193,8 @@ class HttpCache {
 
         if (ttl <= minFresh && -ttl > maxStale) {
             if (revalidateOnStale) {
-                // this._setRevalidationHeaders(headers, responseHeaders);
-                // return;
+                this._setRevalidationHeaders(headers, responseHeaders);
+                return;
             }
 
             if (age > lifetime) {
@@ -203,15 +202,15 @@ class HttpCache {
                 await this.cache.delete(`buffer|${url}`);
             }
 
-            return undefined;
+            return;
         }
 
-        const buffer = await this.cache.get(`buffer|${key}`);
+        const buffer = await this.cache.get(`buffer|${url}`);
 
         if (!buffer) {
             // Cache error, remove the entry.
-            await this.cache.delete(key);
-            return undefined;
+            await this.cache.delete(url);
+            return;
         }
 
         // Warning header has been deprecated, no need to modify it.
@@ -223,14 +222,6 @@ class HttpCache {
     }
 
     async _invalidate(url, baseUrl) {
-        // TODO:
-        // This is not proper invalidation.
-        // Proper invalidation is this:
-        // assume |url|:|method1,method2|
-        // delete |method1:url| |method2:url|
-        // delete |buffer:method1:url| |buffer:method2:url|
-        // delete |url|
-
         if (baseUrl) {
             try {
                 url = (new URL(url, baseUrl)).href;
@@ -264,7 +255,8 @@ class HttpCache {
         }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
-        if (isMethodUnsafe(method) && statusCode >= 200 && statusCode < 400 && statusCode !== 304) {
+        const invalidated = isMethodUnsafe(method) && ((statusCode >= 200 && statusCode < 400 && statusCode !== 304) || statusCode >= 500);
+        if (invalidated) {
             const {location, 'content-location': contentLocation} = responseHeaders;
 
             (async () => {
@@ -287,6 +279,7 @@ class HttpCache {
             // @szmarczak: No, I don't trust this paragraph. Makes no sense.
         }
 
+        // Remove the response from cache if it's not cacheable anymore
         const optionalDelete = async () => {
             if (statusCode === 304) {
                 try {
@@ -316,22 +309,6 @@ class HttpCache {
         if (responseHeaders.vary === '*') {
             return optionalDelete();
         }
-
-        // We need to clone only those request headers we really need
-        let vary = {};
-        if (responseHeaders.vary) {
-            const varyHeaders = responseHeaders.vary.split(',').map(header => header.toLowerCase().trim());
-            
-            for (const header of varyHeaders) {
-                vary[header] = requestHeaders[header];
-            }
-        }
-
-        // We need to clone all the response headers
-        responseHeaders = {...responseHeaders};
-
-        // Fix the date
-        responseHeaders.date = getDate(responseHeaders.date, requestTime);
 
         // Parse lifetime
         const parsedCacheControl = parseCacheControl(responseHeaders['cache-control']);
@@ -393,6 +370,12 @@ class HttpCache {
             return optionalDelete();
         }
 
+        // We need to clone all the response headers
+        responseHeaders = {...responseHeaders};
+
+        // Fix the date
+        responseHeaders.date = getDate(responseHeaders.date, requestTime);
+
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
         const dateValue = Date.parse(responseHeaders.date);
         const responseTime = now;
@@ -403,20 +386,27 @@ class HttpCache {
         const correctedInitialAge = Math.max(apparentAge, correctedAgeValue);
 
         // Let the processing begin
-        this.processing.add(key);
+        this.processing.add(url);
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4
         if (statusCode === 304) {
-            const data = await this.cache.get(url);
+            const update = (async () => {
+                const data = await this.cache.get(url);
 
-            if (data) {
-                Object.assign(data.responseHeaders, responseHeaders);
+                if (data && data.method === method) {
+                    Object.assign(data.responseHeaders, responseHeaders);
 
-                await this.cache.set(key, data);
-            }
+                    await this.cache.set(url, data);
+                }
 
-            this.processing.delete(key);
-            return;
+                this.processing.delete(url);
+            })();
+
+            return async () => {
+                await update;
+
+                // TODO: return response if available
+            };
         }
 
         const chunks = cloneStream(stream);
@@ -424,12 +414,22 @@ class HttpCache {
         stream.once('close', () => {
             chunks.length = 0;
 
-            this.processing.delete(key);
+            this.processing.delete(url);
         });
 
         stream.once('end', async () => {
             const buffer = Buffer.concat(chunks);
             chunks.length = 0;
+
+            // We need to clone only those request headers we really need
+            let vary = {};
+            if (responseHeaders.vary) {
+                const varyHeaders = responseHeaders.vary.split(',').map(header => header.toLowerCase().trim());
+                
+                for (const header of varyHeaders) {
+                    vary[header] = requestHeaders[header];
+                }
+            }
 
             try {
                 // Do NOT use Promise.all(...) here.
@@ -439,13 +439,14 @@ class HttpCache {
                     lifetime,
                     heuristic,
 
+                    method,
                     statusCode,
                     responseHeaders,
 
                     vary,
                     alwaysRevalidate: parsedCacheControl['no-cache'] === '',
                     revalidateOnStale: parsedCacheControl['must-revalidate'] === 'must-revalidate' || (this.shared && parsedCacheControl['proxy-revalidate'] === ''),
-                    invalidated: false
+                    invalidated
                 });
 
                 await this.cache.set(`buffer|${url}`, buffer);
