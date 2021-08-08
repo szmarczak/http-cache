@@ -16,6 +16,7 @@ const cloneStream = stream => {
 };
 
 // https://datatracker.ietf.org/doc/html/rfc7231#section-4.2.3
+// PUT, PATCH, DELETE can be cached as well
 const isMethodCacheable = method => {
     return method === 'GET' || method === 'HEAD' || method === 'POST';
 };
@@ -114,10 +115,19 @@ class HttpCache {
         this.heuristicFraction = 0.1;
         this.maxHeuristic = Number.POSITIVE_INFINITY;
 
-        this.useHead = true;
-
         this.processing = new Set();
-        // this.removeOnInvalidation = true;
+        this.removeOnInvalidation = true;
+    }
+
+    _setRevalidationHeaders(headers, responseHeaders) {
+        headers['if-modified-since'] = responseHeaders.date;
+
+        const {etag} = responseHeaders;
+        if (etag) {
+            headers['if-none-match'] = etag;
+        }
+
+        return headers;
     }
 
     async get(url, method, headers) {
@@ -134,7 +144,7 @@ class HttpCache {
         method = method.toUpperCase();
         const key = `${method}:${url}`;
 
-        const data = await this.cache.get(key);
+        const data = await this.cache.get(url);
         const parsedCacheControl = parseCacheControl(headers['cache-control']);
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.7
@@ -146,6 +156,11 @@ class HttpCache {
             };
         }
 
+        if (data.alwaysRevalidate || parsedCacheControl['no-cache'] === '' || data.invalidated) {
+            // this._setRevalidationHeaders(headers, responseHeaders);
+            // return this._continue.bind(this, key, data);
+        }
+
         const {
             responseTime,
             correctedInitialAge,
@@ -155,13 +170,8 @@ class HttpCache {
             responseHeaders,
 
             vary,
-            alwaysRevalidate,
             revalidateOnStale
         } = data;
-
-        if (alwaysRevalidate || parsedCacheControl['no-cache'] === '') {
-            // TODO: revalidate
-        }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
         for (const [header, value] of Object.entries(vary)) {
@@ -184,26 +194,19 @@ class HttpCache {
 
         if (ttl <= minFresh && -ttl > maxStale) {
             if (revalidateOnStale) {
-                try {
-                    // TODO: revalidate
-                } catch {
-                    return {
-                        statusCode: 504,
-                        responseHeaders: {},
-                        buffer: Buffer.alloc(0)
-                    };
-                }
+                // this._setRevalidationHeaders(headers, responseHeaders);
+                // return;
             }
 
             if (age > lifetime) {
-                await this.cache.delete(key);
-                await this.cache.delete(`buffer:${key}`);
+                await this.cache.delete(url);
+                await this.cache.delete(`buffer|${url}`);
             }
 
             return undefined;
         }
 
-        const buffer = await this.cache.get(`buffer:${key}`);
+        const buffer = await this.cache.get(`buffer|${key}`);
 
         if (!buffer) {
             // Cache error, remove the entry.
@@ -219,7 +222,7 @@ class HttpCache {
         };
     }
 
-    async _invalidate(url) {
+    async _invalidate(url, baseUrl) {
         // TODO:
         // This is not proper invalidation.
         // Proper invalidation is this:
@@ -228,30 +231,48 @@ class HttpCache {
         // delete |buffer:method1:url| |buffer:method2:url|
         // delete |url|
 
-        return Promise.all([
-            this.cache.delete(`GET:${url}`),
-            this.cache.delete(`HEAD:${url}`),
-            this.cache.delete(`POST:${url}`),
+        if (baseUrl) {
+            try {
+                url = (new URL(url, baseUrl)).href;
+            } catch {}
+        }
 
-            this.cache.delete(`buffer:GET:${url}`),
-            this.cache.delete(`buffer:HEAD:${url}`),
-            this.cache.delete(`buffer:POST:${url}`)
-        ]);
+        if (this.removeOnInvalidation) {
+            return Promise.all([
+                this.cache.delete(url),
+                this.cache.delete(`buffer|${url}`)
+            ]);
+        }
+
+        const data = await this.cache.get(url);
+
+        if (!data) {
+            return;
+        }
+
+        data.invalidated = true;
+
+        await this.cache.set(url, data);
     }
 
     process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
-        method = method.toUpperCase();
+        // We don't want to process the same request multiple times.
+        // The RFC says nothing about this but it would make no sense
+        // to download megabytes of data and bottleneck the cache.
+        if (this.processing.has(url)) {
+            return;
+        }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
-        if (isMethodUnsafe(method) && statusCode >= 200 && statusCode < 400) {
+        if (isMethodUnsafe(method) && statusCode >= 200 && statusCode < 400 && statusCode !== 304) {
             const {location, 'content-location': contentLocation} = responseHeaders;
 
             (async () => {
                 try {
                     await Promise.all([
                         this._invalidate(url),
-                        location ? this._invalidate(location) : true,
-                        contentLocation ? this._invalidate(contentLocation) : true
+                        location ? this._invalidate(location, url) : undefined,
+                        contentLocation ? this._invalidate(contentLocation, url) : undefined
                     ]);
                 } catch (error) {
                     this.error = error;
@@ -266,6 +287,16 @@ class HttpCache {
             // @szmarczak: No, I don't trust this paragraph. Makes no sense.
         }
 
+        const optionalDelete = async () => {
+            if (statusCode === 304) {
+                try {
+                    await this.cache.delete(url);
+                } catch (error) {
+                    this.error = error;
+                }
+            }
+        };
+
         const cacheable = isCacheable(
             this.shared,
             method,
@@ -277,21 +308,13 @@ class HttpCache {
         );
 
         if (!cacheable) {
-            return;
+            return optionalDelete();
         }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
         // A Vary header field-value of "*" always fails to match.
         if (responseHeaders.vary === '*') {
-            return;
-        }
-
-        // We don't want to process the same request multiple times.
-        // The RFC says nothing about this but it would make no sense
-        // to download megabytes of data and bottleneck the cache.
-        const key = `${method}:${url}`;
-        if (this.processing.has(key)) {
-            return;
+            return optionalDelete();
         }
 
         // We need to clone only those request headers we really need
@@ -346,17 +369,17 @@ class HttpCache {
             const hashIndex = url.indexOf('#');
             const queryIndex = url.indexOf('?');
             if (hashIndex === -1 ? queryIndex !== -1 : queryIndex < hashIndex) {
-                return;
+                return optionalDelete();
             }
 
             if (!responseHeaders['last-modified']) {
-                return;
+                return optionalDelete();
             }
 
             const parsed = Date.parse(responseHeaders['last-modified']);
 
             if (!parsed) {
-                return;
+                return optionalDelete();
             }
 
             if (!now) {
@@ -367,7 +390,7 @@ class HttpCache {
         }
 
         if (lifetime < 1) {
-            return;
+            return optionalDelete();
         }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
@@ -381,6 +404,21 @@ class HttpCache {
 
         // Let the processing begin
         this.processing.add(key);
+
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4
+        if (statusCode === 304) {
+            const data = await this.cache.get(url);
+
+            if (data) {
+                Object.assign(data.responseHeaders, responseHeaders);
+
+                await this.cache.set(key, data);
+            }
+
+            this.processing.delete(key);
+            return;
+        }
+
         const chunks = cloneStream(stream);
 
         stream.once('close', () => {
@@ -395,7 +433,7 @@ class HttpCache {
 
             try {
                 // Do NOT use Promise.all(...) here.
-                await this.cache.set(key, {
+                await this.cache.set(url, {
                     responseTime,
                     correctedInitialAge,
                     lifetime,
@@ -406,10 +444,11 @@ class HttpCache {
 
                     vary,
                     alwaysRevalidate: parsedCacheControl['no-cache'] === '',
-                    revalidateOnStale: parsedCacheControl['must-revalidate'] === 'must-revalidate' || (this.shared && parsedCacheControl['proxy-revalidate'] === '')
+                    revalidateOnStale: parsedCacheControl['must-revalidate'] === 'must-revalidate' || (this.shared && parsedCacheControl['proxy-revalidate'] === ''),
+                    invalidated: false
                 });
 
-                await this.cache.set(`buffer:${key}`, buffer);
+                await this.cache.set(`buffer|${url}`, buffer);
             } catch (error) {
                 this.error = error;
             }
