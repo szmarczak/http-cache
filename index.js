@@ -174,9 +174,7 @@ class HttpCache {
         const now = Date.now();
         const residentTime = now - responseTime;
         const currentAge = correctedInitialAge + residentTime;
-
-        // It must be ceil, otherwise 0 means it wasn't able to calculate this
-        const age = Math.ceil(currentAge / 1000);
+        const age = Math.floor(currentAge / 1000);
         responseHeaders.age = String(age);
 
         const maxAge = parsedCacheControl['max-age'] || lifetime;
