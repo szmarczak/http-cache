@@ -118,6 +118,8 @@ class HttpCache {
         this.heuristicFraction = 0.1;
         this.maxHeuristic = Number.POSITIVE_INFINITY;
 
+        this.useHead = true;
+
         this.processing = new Set();
         // this.removeOnInvalidation = true;
     }
@@ -136,9 +138,10 @@ class HttpCache {
         const key = `${method}:${url}`;
 
         const data = await this.cache.get(key);
+        const parsedCacheControl = parseCacheControl(headers['cache-control']);
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.7
-        if ((!data || data.alwaysRevalidate) && headers['cache-control']?.includes('only-if-cached')) {
+        if ((!data || data.alwaysRevalidate) && 'only-if-cached' in parsedCacheControl) {
             return {
                 statusCode: 504,
                 responseHeaders: {},
@@ -161,7 +164,7 @@ class HttpCache {
             revalidateOnStale
         } = data;
 
-        if (alwaysRevalidate) {
+        if (alwaysRevalidate || 'no-cache' in parsedCacheControl) {
             // TODO: revalidate
         }
 
@@ -185,7 +188,12 @@ class HttpCache {
         const age = Math.ceil(currentAge / 1000);
         responseHeaders.age = String(age);
 
-        if (age > lifetime) {
+        const maxAge = parsedCacheControl['max-age'] || lifetime;
+        const ttl = maxAge - age;
+        const minFresh = parsedCacheControl['min-fresh'] || 0;
+        const maxStale = parsedCacheControl['max-stale'] || 0;
+
+        if (ttl <= minFresh && -ttl > maxStale) {
             if (revalidateOnStale) {
                 try {
                     // TODO: revalidate
@@ -198,8 +206,11 @@ class HttpCache {
                 }
             }
 
-            await this.cache.delete(key);
-            await this.cache.delete(`buffer:${key}`);
+            if (age > lifetime) {
+                await this.cache.delete(key);
+                await this.cache.delete(`buffer:${key}`);
+            }
+
             return undefined;
         }
 
@@ -378,7 +389,7 @@ class HttpCache {
 
                     vary,
                     alwaysRevalidate: 'no-cache' in parsedCacheControl,
-                    revalidateOnStale: ('must-revalidate' in parseCacheControl) || (this.shared && 'proxy-revalidate')
+                    revalidateOnStale: ('must-revalidate' in parsedCacheControl) || (this.shared && 'proxy-revalidate' in parsedCacheControl)
                 });
 
                 await this.cache.set(`buffer:${key}`, buffer);
