@@ -366,6 +366,10 @@ class HttpCache {
             lifetime = Math.min(this.maxHeuristic, (now - parsed) * this.heuristicFraction);
         }
 
+        if (lifetime < 1) {
+            return;
+        }
+
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
         const dateValue = Date.parse(responseHeaders.date);
         const responseTime = now;
