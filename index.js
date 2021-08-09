@@ -119,25 +119,16 @@ class HttpCache {
         this.removeOnInvalidation = true;
     }
 
-    _setRevalidationHeaders(headers, date, etag) {
-        headers['if-modified-since'] = date;
+    _setRevalidationHeaders(headers, responseHeaders) {
+        headers['if-modified-since'] = responseHeaders['last-modified'] || responseHeaders.date;
 
+        const {etag} = responseHeaders;
         if (etag) {
             headers['if-none-match'] = etag;
         }
     }
 
     async get(url, method, headers) {
-        if (this.error) {
-            const {error} = this;
-
-            this.get = async () => {
-                throw new Error('The cache has been destroyed. Please recreate the HttpCache instance.');
-            };
-
-            throw error;
-        }
-
         const data = await this.cache.get(url);
 
         const parsedCacheControl = parseCacheControl(headers['cache-control']);
@@ -151,15 +142,19 @@ class HttpCache {
             };
         }
 
-        if (data.method !== method) {
+        if (!data || data.method !== method) {
             return;
         }
 
         if (data.alwaysRevalidate || parsedCacheControl['no-cache'] === '' || data.invalidated) {
-            this._setRevalidationHeaders(headers, responseHeaders);
+            this._setRevalidationHeaders(headers, data.responseHeaders);
             return;
         }
 
+        return this.retrieve(url, parsedCacheControl, data);
+    }
+
+    async retrieve(url, parsedCacheControl, data) {
         const {
             responseTime,
             correctedInitialAge,
@@ -217,7 +212,8 @@ class HttpCache {
         return {
             statusCode,
             responseHeaders: {...responseHeaders},
-            buffer
+            buffer: Buffer.from(buffer),
+            cached: true
         };
     }
 
@@ -246,7 +242,7 @@ class HttpCache {
         await this.cache.set(url, data);
     }
 
-    process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime) {
+    process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime, onError) {
         // We don't want to process the same request multiple times.
         // The RFC says nothing about this but it would make no sense
         // to download megabytes of data and bottleneck the cache.
@@ -267,7 +263,7 @@ class HttpCache {
                         contentLocation ? this._invalidate(contentLocation, url) : undefined
                     ]);
                 } catch (error) {
-                    this.error = error;
+                    onError(error);
                 }
             })();
 
@@ -285,7 +281,7 @@ class HttpCache {
                 try {
                     await this.cache.delete(url);
                 } catch (error) {
-                    this.error = error;
+                    onError(error);
                 }
             }
         };
@@ -298,16 +294,18 @@ class HttpCache {
             statusCode,
             responseHeaders.expires,
             responseHeaders['cache-control']
-        );
+        ) || statusCode === 304; // TODO: or === 304 shouldn't be here
 
         if (!cacheable) {
-            return optionalDelete();
+            optionalDelete();
+            return;
         }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
         // A Vary header field-value of "*" always fails to match.
         if (responseHeaders.vary === '*') {
-            return optionalDelete();
+            optionalDelete();
+            return;
         }
 
         // Parse lifetime
@@ -346,17 +344,20 @@ class HttpCache {
             const hashIndex = url.indexOf('#');
             const queryIndex = url.indexOf('?');
             if (hashIndex === -1 ? queryIndex !== -1 : queryIndex < hashIndex) {
-                return optionalDelete();
+                optionalDelete();
+                return;
             }
 
             if (!responseHeaders['last-modified']) {
-                return optionalDelete();
+                optionalDelete();
+                return;
             }
 
             const parsed = Date.parse(responseHeaders['last-modified']);
 
             if (!parsed) {
-                return optionalDelete();
+                optionalDelete();
+                return;
             }
 
             if (!now) {
@@ -367,7 +368,8 @@ class HttpCache {
         }
 
         if (lifetime < 1) {
-            return optionalDelete();
+            optionalDelete();
+            return;
         }
 
         // We need to clone all the response headers
@@ -391,21 +393,30 @@ class HttpCache {
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4
         if (statusCode === 304) {
             const update = (async () => {
-                const data = await this.cache.get(url);
+                try {
+                    // TODO: reuse data from cache.get() when fetching request before waiting for response
+                    const data = await this.cache.get(url);
 
-                if (data && data.method === method) {
-                    Object.assign(data.responseHeaders, responseHeaders);
+                    if (data && data.method === method) {
+                        Object.assign(data.responseHeaders, responseHeaders);
 
-                    await this.cache.set(url, data);
+                        await this.cache.set(url, data);
+                    }
+
+                    return data;
+                } catch (error) {
+                    onError(error);
+                } finally {
+                    this.processing.delete(url);
                 }
-
-                this.processing.delete(url);
             })();
 
             return async () => {
-                await update;
+                const data = await update;
 
-                // TODO: return response if available
+                if (data) {
+                    return this.retrieve(url, {}, data);
+                }
             };
         }
 
@@ -451,27 +462,68 @@ class HttpCache {
 
                 await this.cache.set(`buffer|${url}`, buffer);
             } catch (error) {
-                this.error = error;
+                onError(error);
             }
         });
     }
 }
 
+// TODO: prevent race in cache, maybe buffer should be prefixed with a unique key?
+
 const cache = new HttpCache();
 
 const https = require('https');
 const url = 'https://szmarczak.com/foobar.txt';
-const start = Date.now();
-https.get(url, response => {
-    cache.process(url, 'GET', {}, response.statusCode, response.headers, response, start);
 
-    response.resume();
-    response.on('end', async () => {
-        console.log('got em');
-        const data = await cache.get(url, 'GET', {});
-        console.log(data);
-        console.log(data.buffer.toString());
+const request = async (url, options = { headers: {} }) => {
+    const data = await cache.get(url, 'GET', options.headers);
+
+    if (data) {
+        return data;
+    }
+
+    return new Promise((resolve, reject) => {
+        const start = Date.now();
+        const req = https.get(url, options, response => {
+            const maybe = cache.process(url, 'GET', options.headers, response.statusCode, response.headers, response, start, error => {
+                console.log('cache error', error);
+            });
+
+            console.log(response.statusCode);
+
+            const chunks = [];
+
+            response.on('data', chunk => {
+                chunks.push(chunk);
+            });
+
+            response.on('end', async () => {
+                if (maybe) {
+                    resolve(maybe());
+                    return;
+                }
+
+                resolve({
+                    statusCode: response.statusCode,
+                    responseHeaders: response.headers,
+                    buffer: Buffer.concat(chunks),
+                    cached: false
+                });
+            });
+
+            response.once('error', reject);
+        });
+
+        req.once('error', reject);
     });
-});
+};
 
-// TODO: - conditional requests,
+(async () => {
+    console.log(await request(url));
+
+    console.log(await request(url, {
+        headers: {
+            'cache-control': 'no-cache'
+        }
+    }));
+})();
