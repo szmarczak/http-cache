@@ -15,6 +15,9 @@ const cloneStream = stream => {
     return chunks;
 };
 
+// Use crypto.randomUUID() when targeting Node.js 15
+const random = () => Math.random().toString(36).slice(2);
+
 // https://datatracker.ietf.org/doc/html/rfc7231#section-4.2.3
 // PUT, PATCH, DELETE can be cached as well
 const isMethodCacheable = method => {
@@ -107,7 +110,6 @@ const isCacheable = (isShared, method, authorization, requestCacheControl = '', 
 
 class HttpCache {
     constructor(cache = new Map()) {
-        this.error = undefined;
         this.cache = cache;
         this.shared = true;
 
@@ -156,6 +158,8 @@ class HttpCache {
 
     async retrieve(url, parsedCacheControl, data) {
         const {
+            id,
+
             responseTime,
             correctedInitialAge,
             lifetime,
@@ -193,18 +197,25 @@ class HttpCache {
             }
 
             if (age > lifetime) {
-                await this.cache.delete(url);
                 await this.cache.delete(`buffer|${url}`);
+                await this.cache.delete(url);
             }
 
             return;
         }
 
-        const buffer = await this.cache.get(`buffer|${url}`);
+        const bufferData = await this.cache.get(`buffer|${url}`);
 
-        if (!buffer) {
+        if (!bufferData) {
             // Cache error, remove the entry.
             await this.cache.delete(url);
+            return;
+        }
+
+        const [check, buffer] = bufferData;
+
+        if (check !== id) {
+            // Whoops, we need to prevent race condition.
             return;
         }
 
@@ -225,10 +236,9 @@ class HttpCache {
         }
 
         if (this.removeOnInvalidation) {
-            return Promise.all([
-                this.cache.delete(url),
-                this.cache.delete(`buffer|${url}`)
-            ]);
+            await this.cache.delete(`buffer|${url}`);
+            await this.cache.delete(url);
+            return;
         }
 
         const data = await this.cache.get(url);
@@ -443,8 +453,12 @@ class HttpCache {
             }
 
             try {
+                // The ID changes
+                const id = random();
+
                 // Do NOT use Promise.all(...) here.
                 await this.cache.set(url, {
+                    id,
                     responseTime,
                     correctedInitialAge,
                     lifetime,
@@ -460,15 +474,13 @@ class HttpCache {
                     invalidated
                 });
 
-                await this.cache.set(`buffer|${url}`, buffer);
+                await this.cache.set(`buffer|${url}`, [id, buffer]);
             } catch (error) {
                 onError(error);
             }
         });
     }
 }
-
-// TODO: prevent race in cache, maybe buffer should be prefixed with a unique key?
 
 const cache = new HttpCache();
 
