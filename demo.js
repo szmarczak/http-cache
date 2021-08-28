@@ -1,22 +1,25 @@
-const crypto = require('crypto');
-const random = () => Math.random().toString(36).slice(2);
+const http = require('http');
 
-console.time('random');
-for (let i = 0; i < 1000000; i++) {
-    random();
-}
-console.timeEnd('random');
+let now = false;
 
-console.time('uuid');
-for (let i = 0; i < 1000000; i++) {
-    crypto.randomUUID();
-}
-console.timeEnd('uuid');
+const y = new Date(0).toUTCString();
 
-const y = 10 ** 10;
+http.createServer((request, response) => {
+    response.setHeader('last-modified', y);
 
-console.time('int');
-for (let i = 0; i < 1000000; i++) {
-    crypto.randomInt(y).toString(36);
-}
-console.timeEnd('int');
+    if (request.headers['if-modified-since'] === y) {
+        if (now) {
+            response.setHeader('cache-control', 'max-age=lol');
+            now = false;
+        }
+
+        response.statusCode = 304;
+        response.end();
+
+        now = true;
+        return;
+    }
+
+    // response.setHeader('etag', 'yay');
+    response.end('<a href="/">here</a>');
+}).listen(8888);

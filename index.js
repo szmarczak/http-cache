@@ -19,7 +19,6 @@ const cloneStream = stream => {
 const random = () => Math.random().toString(36).slice(2);
 
 // https://datatracker.ietf.org/doc/html/rfc7231#section-4.2.3
-// PUT, PATCH, DELETE can be cached as well
 const isMethodCacheable = method => {
     return method === 'GET' || method === 'HEAD' || method === 'POST';
 };
@@ -223,8 +222,7 @@ class HttpCache {
         return {
             statusCode,
             responseHeaders: {...responseHeaders},
-            buffer: Buffer.from(buffer),
-            cached: true
+            buffer: Buffer.from(buffer)
         };
     }
 
@@ -320,36 +318,32 @@ class HttpCache {
 
         // Parse lifetime
         const parsedCacheControl = parseCacheControl(responseHeaders['cache-control']);
+        const now = Date.now();
 
-        let lifetime = 0;
-        let heuristic = true;
+        let lifetime;
+        let heuristic = false;
 
         if (this.shared && parsedCacheControl['s-maxage']) {
-            lifetime = Number(parsedCacheControl['s-maxage']) || 0;
-        }
+            const parsed = Number(parsedCacheControl['s-maxage']);
 
-        if (lifetime === 0 && parsedCacheControl['max-age']) {
-            lifetime = Number(parsedCacheControl['max-age']) || 0;
-        }
+            if (Number.isNaN(parsed) === false) {
+                lifetime = parsed;
+            }
+        } else if (parsedCacheControl['max-age']) {
+            const parsed = Number(parsedCacheControl['max-age']);
 
-        let now;
-
-        if (lifetime === 0 && responseHeaders.expires) {
+            if (Number.isNaN(parsed) === false) {
+                lifetime = parsed;
+            }
+        } else if (responseHeaders.expires) {
             const parsed = Date.parse(responseHeaders.expires);
 
-            if (parsed) {
-                now = Date.now();
+            if (Number.isNaN(parsed) === false) {
                 lifetime = now - parsed;
             }
-        }
-
-        if (lifetime !== 0) {
-            heuristic = false;
-
-            if (!now) {
-                now = Date.now();
-            }
         } else {
+            heuristic = true;
+
             // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
             const hashIndex = url.indexOf('#');
             const queryIndex = url.indexOf('?');
@@ -511,7 +505,9 @@ const request = async (url, options = { headers: {} }) => {
 
             response.on('end', async () => {
                 if (maybe) {
-                    resolve(maybe());
+                    const result = await maybe();
+                    result.cached = true;
+                    resolve(result);
                     return;
                 }
 
