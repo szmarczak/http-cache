@@ -4,6 +4,8 @@ const parseCacheControl = require('./parse-cache-control');
 
 const {on} = EventEmitter.prototype;
 
+// TODO: https://www.iana.org/assignments/http-cache-directives/http-cache-directives.xhtml
+
 // Big thanks to @ronag - https://github.com/nodejs/node/issues/39632#issuecomment-891739612
 const cloneStream = stream => {
     const chunks = [];
@@ -39,6 +41,7 @@ const isHeuristicStatusCode = statusCode => {
             statusCode === 204 ||
             statusCode === 300 ||
             statusCode === 301 ||
+            statusCode === 308 ||
             statusCode === 404 ||
             statusCode === 405 ||
             statusCode === 410 ||
@@ -62,7 +65,7 @@ const getDate = (date, requestTime) => {
         }
     }
 
-    return new Date().toUTCString();
+    return new Date(requestTime).toUTCString();
 };
 
 // https://datatracker.ietf.org/doc/html/rfc7234#section-3.2
@@ -124,6 +127,8 @@ class HttpCache {
         }
 
         if (data.alwaysRevalidate || parsedCacheControl['no-cache'] === '' || data.invalidated) {
+            // TODO: in the future caches will be able to independently perform validation
+            //       https://httpwg.org/http-core/draft-ietf-httpbis-cache-latest.html#rfc.section.4.3.1
             this._setRevalidationHeaders(headers, data.responseHeaders);
             return;
         }
@@ -163,7 +168,8 @@ class HttpCache {
         const maxAge = parsedCacheControl['max-age'] || lifetime;
         const ttl = maxAge - age;
         const minFresh = parsedCacheControl['min-fresh'] || 0;
-        const maxStale = parsedCacheControl['max-stale'] || 0;
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.2
+        const maxStale = parsedCacheControl['max-stale'] || (parsedCacheControl['max-stale'] === '' ? Infinity : 0);
 
         if (ttl <= minFresh && -ttl > maxStale) {
             if (revalidateOnStale) {
@@ -232,8 +238,13 @@ class HttpCache {
             return;
         }
 
+        // TODO: optionally return cached responses on 5XX unless must-revalidate
+        // TODO: freshening responses with HEAD
+        // TODO: content-length mismatch on HEAD invalidates the cached response
+
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
-        const invalidated = isMethodUnsafe(method) && ((statusCode >= 200 && statusCode < 400 && statusCode !== 304) || statusCode >= 500);
+        // @szmarczak: It makes sense to invalidate responses on some 5XX as well.
+        const invalidated = isMethodUnsafe(method) && ((statusCode >= 200 && statusCode < 400 && statusCode !== 304) || (statusCode === 500 || statusCode === 502 || statusCode === 504 || statusCode === 507));
         if (invalidated) {
             const {location, 'content-location': contentLocation} = responseHeaders;
 
@@ -254,18 +265,8 @@ class HttpCache {
             // differs from the host part in the effective request URI (Section 5.5
             // of [RFC7230]).  This helps prevent denial-of-service attacks.
             //
-            // @szmarczak: No, I don't trust this paragraph. Makes no sense.
+            // @szmarczak: This paragraph makes no sense for origins that represent storages.
         }
-
-        // Remove the response from cache if it's not cacheable anymore
-        const remove = async () => {
-            try {
-                await this.cache.delete(`buffer|${url}`);
-                await this.cache.delete(url);
-            } catch (error) {
-                onError(error);
-            }
-        };
 
         if (!isMethodCacheable(method)) {
             return;
@@ -292,25 +293,21 @@ class HttpCache {
             // A Vary header field-value of "*" always fails to match.
             responseHeaders.vary === '*'
         ) {
-            lifetime = undefined;
+            lifetime = false;
         } else if (this.shared && responseCacheControl['s-maxage']) {
+            responseCacheControl['proxy-revalidate'] = '';
+
             const parsed = Number(responseCacheControl['s-maxage']);
 
-            if (Number.isNaN(parsed) === false) {
-                lifetime = parsed;
-            }
+            lifetime = Number.isNaN(parsed) ? undefined : parsed;
         } else if (responseCacheControl['max-age']) {
             const parsed = Number(responseCacheControl['max-age']);
 
-            if (Number.isNaN(parsed) === false) {
-                lifetime = parsed;
-            }
+            lifetime = Number.isNaN(parsed) ? undefined : parsed;
         } else if (responseHeaders.expires) {
             const parsed = Date.parse(responseHeaders.expires);
 
-            if (Number.isNaN(parsed) === false) {
-                lifetime = now - parsed;
-            }
+            lifetime = Number.isNaN(parsed) ? 0 : (now - parsed);
         } else if (
             isHeuristicStatusCode(statusCode) ||
             responseCacheControl['public'] === '' ||
@@ -319,6 +316,7 @@ class HttpCache {
             heuristic = true;
 
             // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
+            // TODO: accept explicit cache control such as no-cache
             const hashIndex = url.indexOf('#');
             const queryIndex = url.indexOf('?');
             if (hashIndex === -1 ? queryIndex !== -1 : queryIndex < hashIndex) {
@@ -339,8 +337,10 @@ class HttpCache {
                 return;
             }
 
-            lifetime = Math.min(this.maxHeuristic, (now - parsed) * this.heuristicFraction);
+            lifetime = Math.floor(Math.min(this.maxHeuristic, (now - parsed) * this.heuristicFraction));
         }
+
+        console.log(lifetime);
 
         // Invalid lifetime
         if (lifetime < 0) {
@@ -373,6 +373,8 @@ class HttpCache {
         let previousData;
         let data;
 
+        // TODO: if the new response has a validator then, then the cached response may be updated only if its validator is the same as the new response
+
         stream.once('end', async () => {
             const buffer = Buffer.concat(chunks);
             chunks.length = 0;
@@ -392,7 +394,8 @@ class HttpCache {
                     }
                 } catch (error) {
                     this.processing.delete(url);
-                    cacheError = cacheError;
+                    cacheError = error;
+                    resolve();
                     return;
                 }
             }
@@ -440,7 +443,7 @@ class HttpCache {
                         responseHeaders,
 
                         vary,
-                        alwaysRevalidate: responseCacheControl['no-cache'] === '',
+                        alwaysRevalidate: 'no-cache' in responseCacheControl,
                         revalidateOnStale: responseCacheControl['must-revalidate'] === '' || (this.shared && responseCacheControl['proxy-revalidate'] === ''),
                         invalidated
                     };
@@ -453,6 +456,7 @@ class HttpCache {
                         resolve();
                     }
                 } else {
+                    // Remove the response from cache if it's not cacheable anymore
                     queueMicrotask(async () => {
                         removing = true;
 
@@ -463,12 +467,17 @@ class HttpCache {
                             onError(error);
                         }
                     });
+
+                    if (statusCode === 304) {
+                        resolve();
+                    }
                 }
             } catch (error) {
                 this.processing.delete(url);
 
                 if (statusCode === 304) {
                     cacheError = error;
+                    resolve();
                     return;
                 }
 
@@ -489,7 +498,7 @@ class HttpCache {
                     // TODO: this should wait for the removal first
                     result = await this.get(url, method, requestHeaders);
                 } else {
-                    result = this.retrieve(url, requestCacheControl, data || previousData);
+                    result = await this.retrieve(url, requestCacheControl, data || previousData);
                 }
 
                 if (result === undefined) {

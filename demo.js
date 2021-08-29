@@ -2,46 +2,21 @@ const http = require('http');
 
 let now = false;
 
-const y = new Date(new Date().getSeconds() * 1000 + new Date().getMilliseconds()).toUTCString();
+const y = 'y';
 
 http.createServer((request, response) => {
-    if (now) {
-        response.end('<a href="/">here</a>');    
-        return;
-    }
+    // response.setHeader('last-modified', y);
+    // response.setHeader('cache-control', 'max-age=60');
 
-    now = true;
-
-    response.setHeader('cache-control', 'max-age=20, public');
-    response.end('<a href="/">here</a>');
-}).listen(8888);
-
-/*
-const http = require('http');
-
-let now = false;
-
-const y = new Date(new Date().getSeconds() * 1000 + new Date().getMilliseconds()).toUTCString();
-
-http.createServer((request, response) => {
-    response.setHeader('last-modified', y);
-    response.setHeader('cache-control', 'public');
-
-    if (request.headers['if-modified-since'] === y) {
-        if (now) {
-            // response.setHeader('cache-control', 'max-age=100');
-            now = false;
-        }
-
+    if (request.headers['if-none-match'] === y) {
+        response.setHeader('cache-control', 'max-age=asdf');
         response.statusCode = 304;
         response.end();
-
-        now = true;
         return;
     }
 
-    response.statusCode = 451;
-    // response.setHeader('etag', 'yay');
+    // response.statusCode = 451;
+    response.setHeader('etag', y);
+    // response.setHeader('cache-control', 'public');
     response.end('<a href="/">here</a>');
 }).listen(8888);
-*/
