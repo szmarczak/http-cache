@@ -316,10 +316,11 @@ class HttpCache {
             heuristic = true;
 
             // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
-            // TODO: accept explicit cache control such as no-cache
             const hashIndex = url.indexOf('#');
             const queryIndex = url.indexOf('?');
-            if (hashIndex === -1 ? queryIndex !== -1 : queryIndex < hashIndex) {
+            const hasQuery = hashIndex === -1 ? queryIndex !== -1 : (queryIndex < hashIndex);
+            if (hasQuery) {
+                lifetime = 'no-cache' in responseCacheControl ? 0 : false;
                 // TODO: break if instead
                 return;
             }
