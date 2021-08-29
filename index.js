@@ -32,7 +32,7 @@ const isMethodUnsafe = method => {
 };
 
 // https://datatracker.ietf.org/doc/html/rfc7231#section-6.1
-// 206 is hard, see https://datatracker.ietf.org/doc/html/rfc7234#section-3.1
+// 206 is hard to implement: https://datatracker.ietf.org/doc/html/rfc7234#section-3.1
 const isHeuristicStatusCode = statusCode => {
     return  statusCode === 200 ||
             statusCode === 203 ||
@@ -66,45 +66,21 @@ const getDate = (date, requestTime) => {
 };
 
 // https://datatracker.ietf.org/doc/html/rfc7234#section-3.2
-// must-revalidate and s-maxage cannot be served stale
-// "max-age=0, must-revalidate" or "s-maxage=0" must be validated
-const isCacheControlAuthorizationOk = (isShared, authorized, responseCacheControl) => {
+const isCacheControlAuthorizationOk = (isShared, authenticated, responseCacheControl) => {
     if (!isShared) {
         return true;
     }
 
-    if (!authorized) {
+    if (!authenticated) {
         return true;
     }
 
-    return  responseCacheControl.includes('public') ||
-            responseCacheControl.includes('must-revalidate') ||
-            // Has the same meaning as `must-revalidate` but for shared caches only
-            (isShared && responseCacheControl.includes('proxy-revalidate')) ||
-            responseCacheControl.includes('s-maxage');
-};
-
-// https://datatracker.ietf.org/doc/html/rfc7234#section-3
-const isCacheControlOk = (isShared, authorization, requestCacheControl, responseCacheControl) => {
-    return !requestCacheControl.includes('no-store') && !responseCacheControl.includes('no-store')
-        && (isShared ? !responseCacheControl.includes('private') : true)
-        && isCacheControlAuthorizationOk(authorization, responseCacheControl);
-};
-
-// https://datatracker.ietf.org/doc/html/rfc7234#section-3
-const isResponseOk = (isShared, statusCode, expires, responseCacheControl) => {
-    return  Boolean(expires) ||
-            responseCacheControl.includes('max-age') ||
-            (isShared && responseCacheControl.includes('s-maxage')) ||
-            isHeuristicStatusCode(statusCode) ||
-            responseCacheControl.includes('public');
-};
-
-// https://datatracker.ietf.org/doc/html/rfc7234#section-3
-const isCacheable = (isShared, method, authorization, requestCacheControl = '', statusCode, expires = '', responseCacheControl = '') => {
-    return isMethodCacheable(method)
-        && isCacheControlOk(isShared, authorization, requestCacheControl, responseCacheControl)
-        && isResponseOk(isShared, statusCode, expires, responseCacheControl);
+    return  responseCacheControl['public'] === '' ||
+            responseCacheControl['must-revalidate'] === '' ||
+            responseCacheControl['max-age'] ||
+            // Shared cache only:
+            responseCacheControl['proxy-revalidate'] === '' ||
+            responseCacheControl['s-maxage'];
 };
 
 class HttpCache {
@@ -251,10 +227,8 @@ class HttpCache {
     }
 
     process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime, onError) {
-        // We don't want to process the same request multiple times.
-        // The RFC says nothing about this but it would make no sense
-        // to download megabytes of data and bottleneck the cache.
-        if (this.processing.has(url)) {
+        // TODO: Cancel previous caching tasks instead of this check
+        if (this.processing.has(url) && statusCode !== 304) {
             return;
         }
 
@@ -284,53 +258,49 @@ class HttpCache {
         }
 
         // Remove the response from cache if it's not cacheable anymore
-        const optionalDelete = async () => {
-            if (statusCode === 304) {
-                try {
-                    await this.cache.delete(url);
-                } catch (error) {
-                    onError(error);
-                }
+        const remove = async () => {
+            try {
+                await this.cache.delete(`buffer|${url}`);
+                await this.cache.delete(url);
+            } catch (error) {
+                onError(error);
             }
         };
 
-        const cacheable = isCacheable(
-            this.shared,
-            method,
-            requestHeaders.authorization,
-            requestHeaders['cache-control'],
-            statusCode,
-            responseHeaders.expires,
-            responseHeaders['cache-control']
-        ) || statusCode === 304; // TODO: or === 304 shouldn't be here
-
-        if (!cacheable) {
-            optionalDelete();
-            return;
-        }
-
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
-        // A Vary header field-value of "*" always fails to match.
-        if (responseHeaders.vary === '*') {
-            optionalDelete();
+        if (!isMethodCacheable(method)) {
             return;
         }
 
         // Parse lifetime
-        const parsedCacheControl = parseCacheControl(responseHeaders['cache-control']);
-        const now = Date.now();
+        const responseCacheControl = parseCacheControl(responseHeaders['cache-control']);
+        const requestCacheControl = parseCacheControl(requestHeaders['cache-control']);
 
+        if (!isCacheControlAuthorizationOk(this.shared, 'authorization' in requestHeaders, responseCacheControl)) {
+            return;
+        }
+
+        const now = Date.now();
         let lifetime;
         let heuristic = false;
 
-        if (this.shared && parsedCacheControl['s-maxage']) {
-            const parsed = Number(parsedCacheControl['s-maxage']);
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-3
+        if (
+            requestCacheControl['no-store'] === '' ||
+            responseCacheControl['no-store'] === '' ||
+            (this.shared && 'private' in responseCacheControl) ||
+            // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
+            // A Vary header field-value of "*" always fails to match.
+            responseHeaders.vary === '*'
+        ) {
+            lifetime = undefined;
+        } else if (this.shared && responseCacheControl['s-maxage']) {
+            const parsed = Number(responseCacheControl['s-maxage']);
 
             if (Number.isNaN(parsed) === false) {
                 lifetime = parsed;
             }
-        } else if (parsedCacheControl['max-age']) {
-            const parsed = Number(parsedCacheControl['max-age']);
+        } else if (responseCacheControl['max-age']) {
+            const parsed = Number(responseCacheControl['max-age']);
 
             if (Number.isNaN(parsed) === false) {
                 lifetime = parsed;
@@ -341,104 +311,95 @@ class HttpCache {
             if (Number.isNaN(parsed) === false) {
                 lifetime = now - parsed;
             }
-        } else {
+        } else if (
+            isHeuristicStatusCode(statusCode) ||
+            responseCacheControl['public'] === '' ||
+            (!this.shared && 'private' in responseCacheControl)
+        ) {
             heuristic = true;
 
             // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
             const hashIndex = url.indexOf('#');
             const queryIndex = url.indexOf('?');
             if (hashIndex === -1 ? queryIndex !== -1 : queryIndex < hashIndex) {
-                optionalDelete();
+                // TODO: break if instead
                 return;
             }
 
+            // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
             if (!responseHeaders['last-modified']) {
-                optionalDelete();
+                // TODO: break if instead
                 return;
             }
 
             const parsed = Date.parse(responseHeaders['last-modified']);
 
-            if (!parsed) {
-                optionalDelete();
+            if (Number.isNaN(parsed)) {
+                // TODO: break if instead
                 return;
-            }
-
-            if (!now) {
-                now = Date.now();
             }
 
             lifetime = Math.min(this.maxHeuristic, (now - parsed) * this.heuristicFraction);
         }
 
-        if (lifetime < 1) {
-            optionalDelete();
-            return;
+        // Invalid lifetime
+        if (lifetime < 0) {
+            lifetime = undefined;
         }
-
-        // We need to clone all the response headers
-        responseHeaders = {...responseHeaders};
-
-        // Fix the date
-        responseHeaders.date = getDate(responseHeaders.date, requestTime);
-
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
-        const dateValue = Date.parse(responseHeaders.date);
-        const responseTime = now;
-        const apparentAge = Math.max(0, responseTime - dateValue);
-        const responseDelay = responseTime - requestTime;
-        const ageValue = Number(responseHeaders.age) || 0;
-        const correctedAgeValue = ageValue + responseDelay;
-        const correctedInitialAge = Math.max(apparentAge, correctedAgeValue);
 
         // Let the processing begin
         this.processing.add(url);
 
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4
+        let resolve;
+        let promise;
+        let cacheError;
+        let removing = false;
         if (statusCode === 304) {
-            const update = (async () => {
-                try {
-                    // TODO: reuse data from cache.get() when fetching request before waiting for response
-                    const data = await this.cache.get(url);
-
-                    if (data && data.method === method) {
-                        Object.assign(data.responseHeaders, responseHeaders);
-
-                        await this.cache.set(url, data);
-                    }
-
-                    return data;
-                } catch (error) {
-                    onError(error);
-                } finally {
-                    this.processing.delete(url);
-                }
-            })();
-
-            return async () => {
-                const data = await update;
-
-                if (data) {
-                    return this.retrieve(url, {}, data);
-                }
-            };
+            promise = new Promise(_resolve => {
+                resolve = _resolve;
+            });
         }
 
         const chunks = cloneStream(stream);
 
         stream.once('close', () => {
             chunks.length = 0;
+        });
 
+        stream.once('error', () => {
             this.processing.delete(url);
         });
+
+        let previousData;
+        let data;
 
         stream.once('end', async () => {
             const buffer = Buffer.concat(chunks);
             chunks.length = 0;
 
+            // https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4
+            if (lifetime !== undefined && statusCode === 304) {
+                try {
+                    if (buffer.length !== 0) {
+                        throw new Error('Unexpected response body on status code 304');
+                    }
+
+                    // We can't reuse data object from the validation step because it might change
+                    previousData = await this.cache.get(url);
+
+                    if (previousData.method !== method) {
+                        throw new Error('Cache mismatch - please try again');
+                    }
+                } catch (error) {
+                    this.processing.delete(url);
+                    cacheError = cacheError;
+                    return;
+                }
+            }
+
             // We need to clone only those request headers we really need
             let vary = {};
-            if (responseHeaders.vary) {
+            if (lifetime !== undefined && responseHeaders.vary) {
                 const varyHeaders = responseHeaders.vary.split(',').map(header => header.toLowerCase().trim());
                 
                 for (const header of varyHeaders) {
@@ -447,38 +408,104 @@ class HttpCache {
             }
 
             try {
-                // The ID changes
-                const id = random();
+                if (lifetime !== undefined) {
+                    // The ID changes on refresh
+                    const id = previousData ? previousData.id : random();
 
-                // Do NOT use Promise.all(...) here.
-                await this.cache.set(url, {
-                    id,
-                    responseTime,
-                    correctedInitialAge,
-                    lifetime,
-                    heuristic,
+                    // We need to clone all the response headers
+                    responseHeaders = {...responseHeaders};
 
-                    method,
-                    statusCode,
-                    responseHeaders,
+                    // Fix the date
+                    responseHeaders.date = getDate(responseHeaders.date, requestTime);
 
-                    vary,
-                    alwaysRevalidate: parsedCacheControl['no-cache'] === '',
-                    revalidateOnStale: parsedCacheControl['must-revalidate'] === 'must-revalidate' || (this.shared && parsedCacheControl['proxy-revalidate'] === ''),
-                    invalidated
-                });
+                    // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
+                    const dateValue = Date.parse(responseHeaders.date);
+                    const responseTime = now;
+                    const apparentAge = Math.max(0, responseTime - dateValue);
+                    const responseDelay = responseTime - requestTime;
+                    const ageValue = Number(responseHeaders.age) || 0;
+                    const correctedAgeValue = ageValue + responseDelay;
+                    const correctedInitialAge = Math.max(apparentAge, correctedAgeValue);
 
-                await this.cache.set(`buffer|${url}`, [id, buffer]);
+                    // Prepare the data
+                    data = {
+                        id,
+                        responseTime,
+                        correctedInitialAge,
+                        lifetime,
+                        heuristic,
+
+                        method,
+                        statusCode,
+                        responseHeaders,
+
+                        vary,
+                        alwaysRevalidate: responseCacheControl['no-cache'] === '',
+                        revalidateOnStale: responseCacheControl['must-revalidate'] === '' || (this.shared && responseCacheControl['proxy-revalidate'] === ''),
+                        invalidated
+                    };
+
+                    await this.cache.set(url, data);
+
+                    if (statusCode !== 304) {
+                        await this.cache.set(`buffer|${url}`, [id, buffer]);
+                    } else {
+                        resolve();
+                    }
+                } else {
+                    queueMicrotask(async () => {
+                        removing = true;
+
+                        try {
+                            await this.cache.delete(`buffer|${url}`);
+                            await this.cache.delete(url);
+                        } catch (error) {
+                            onError(error);
+                        }
+                    });
+                }
             } catch (error) {
+                this.processing.delete(url);
+
+                if (statusCode === 304) {
+                    cacheError = error;
+                    return;
+                }
+
                 onError(error);
             }
         });
+
+        if (statusCode === 304) {
+            return async () => {
+                await promise;
+
+                if (cacheError) {
+                    throw cacheError;
+                }
+
+                let result;
+                if (removing) {
+                    // TODO: this should wait for the removal first
+                    result = await this.get(url, method, requestHeaders);
+                } else {
+                    result = this.retrieve(url, requestCacheControl, data || previousData);
+                }
+
+                if (result === undefined) {
+                    // TODO: what to do here?
+                }
+
+                return result;
+            };
+        }
     }
 }
 
 const cache = new HttpCache();
 
 const https = require('https');
+const assert = require('assert');
 const url = 'https://szmarczak.com/foobar.txt';
 
 const request = async (url, options = { headers: {} }) => {
