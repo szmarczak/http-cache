@@ -281,8 +281,13 @@ class HttpCache {
         }
 
         const now = Date.now();
-        let lifetime;
         let heuristic = false;
+
+        // Lifetime legend:
+        // undefined - update on 304
+        // false     - remove
+        // number    - update if 304, save otherwise
+        let lifetime;
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-3
         if (
@@ -299,11 +304,11 @@ class HttpCache {
 
             const parsed = Number(responseCacheControl['s-maxage']);
 
-            lifetime = Number.isNaN(parsed) ? undefined : parsed;
+            lifetime = Number.isNaN(parsed) ? false : parsed;
         } else if (responseCacheControl['max-age']) {
             const parsed = Number(responseCacheControl['max-age']);
 
-            lifetime = Number.isNaN(parsed) ? undefined : parsed;
+            lifetime = Number.isNaN(parsed) ? false : parsed;
         } else if (responseHeaders.expires) {
             const parsed = Date.parse(responseHeaders.expires);
 
@@ -315,37 +320,38 @@ class HttpCache {
         ) {
             heuristic = true;
 
-            // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
-            const hashIndex = url.indexOf('#');
-            const queryIndex = url.indexOf('?');
-            const hasQuery = hashIndex === -1 ? queryIndex !== -1 : (queryIndex < hashIndex);
-            if (hasQuery) {
-                lifetime = 'no-cache' in responseCacheControl ? 0 : false;
-                // TODO: break if instead
-                return;
-            }
+            do {
+                // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
+                const hashIndex = url.indexOf('#');
+                const queryIndex = url.indexOf('?');
+                const hasQuery = hashIndex === -1 ? queryIndex !== -1 : (queryIndex < hashIndex);
+                if (hasQuery) {
+                    lifetime = 'no-cache' in responseCacheControl ? 0 : false;
+                    break;
+                }
 
-            // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
-            if (!responseHeaders['last-modified']) {
-                // TODO: break if instead
-                return;
-            }
+                // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
+                if (!responseHeaders['last-modified']) {
+                    lifetime = undefined;
+                    break;
+                }
 
-            const parsed = Date.parse(responseHeaders['last-modified']);
+                const parsed = Date.parse(responseHeaders['last-modified']);
 
-            if (Number.isNaN(parsed)) {
-                // TODO: break if instead
-                return;
-            }
+                if (Number.isNaN(parsed)) {
+                    lifetime = false;
+                    break;
+                }
 
-            lifetime = Math.floor(Math.min(this.maxHeuristic, (now - parsed) * this.heuristicFraction));
+                lifetime = Math.floor(Math.min(this.maxHeuristic, (now - parsed) * this.heuristicFraction));
+            } while (false);
         }
 
         console.log(lifetime);
 
         // Invalid lifetime
         if (lifetime < 0) {
-            lifetime = undefined;
+            lifetime = 0;
         }
 
         // Let the processing begin
