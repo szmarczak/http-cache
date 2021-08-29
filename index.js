@@ -2,6 +2,8 @@
 const {EventEmitter} = require('events');
 const parseCacheControl = require('./parse-cache-control');
 
+// Do not use ESM here. We need coverage.
+
 const {on} = EventEmitter.prototype;
 
 // TODO: https://www.iana.org/assignments/http-cache-directives/http-cache-directives.xhtml
@@ -97,6 +99,8 @@ class HttpCache {
 
         this.processing = new Set();
         this.removeOnInvalidation = true;
+
+        this.error = undefined;
     }
 
     _setRevalidationHeaders(headers, responseHeaders) {
@@ -109,6 +113,11 @@ class HttpCache {
     }
 
     async get(url, method, headers) {
+        if (this.error) {
+            // TODO: regenrate stack trace here & in other places
+            throw this.error;
+        }
+
         const data = await this.cache.get(url);
 
         const parsedCacheControl = parseCacheControl(headers['cache-control']);
@@ -178,8 +187,14 @@ class HttpCache {
             }
 
             if (age > lifetime) {
-                await this.cache.delete(`buffer|${url}`);
-                await this.cache.delete(url);
+                try {
+                    await this.cache.delete(`buffer|${url}`);
+                    await this.cache.delete(url);
+                } catch (error) {
+                    this.error = error;
+
+                    throw error;
+                }
             }
 
             return;
@@ -189,7 +204,13 @@ class HttpCache {
 
         if (!bufferData) {
             // Cache error, remove the entry.
-            await this.cache.delete(url);
+            try {
+                await this.cache.delete(url);
+            } catch (error) {
+                this.error = error;
+
+                throw error;
+            }
             return;
         }
 
@@ -216,8 +237,15 @@ class HttpCache {
         }
 
         if (this.removeOnInvalidation) {
-            await this.cache.delete(`buffer|${url}`);
-            await this.cache.delete(url);
+            try {
+                await this.cache.delete(`buffer|${url}`);
+                await this.cache.delete(url);
+            } catch (error) {
+                this.error = error;
+
+                throw error;
+            }
+
             return;
         }
 
@@ -229,7 +257,13 @@ class HttpCache {
 
         data.invalidated = true;
 
-        await this.cache.set(url, data);
+        try {
+            await this.cache.set(url, data);
+        } catch (error) {
+            this.error = error;
+
+            throw error;
+        }
     }
 
     process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime, onError) {
@@ -248,17 +282,11 @@ class HttpCache {
         if (invalidated) {
             const {location, 'content-location': contentLocation} = responseHeaders;
 
-            (async () => {
-                try {
-                    await Promise.all([
-                        this._invalidate(url),
-                        location ? this._invalidate(location, url) : undefined,
-                        contentLocation ? this._invalidate(contentLocation, url) : undefined
-                    ]);
-                } catch (error) {
-                    onError(error);
-                }
-            })();
+            [
+                this._invalidate(url),
+                location ? this._invalidate(location, url) : undefined,
+                contentLocation ? this._invalidate(contentLocation, url) : undefined
+            ].map(promise => promise.catch(onError));
 
             // However, a cache MUST NOT invalidate a URI from a Location or
             // Content-Location response header field if the host part of that URI
@@ -347,7 +375,9 @@ class HttpCache {
             } while (false);
         }
 
-        console.log(lifetime);
+        if (lifetime === undefined && statusCode !== 304) {
+            return;
+        }
 
         // Invalid lifetime
         if (lifetime < 0) {
@@ -387,16 +417,18 @@ class HttpCache {
             chunks.length = 0;
 
             // https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4
-            if (lifetime !== undefined && statusCode === 304) {
+            if (lifetime !== false && statusCode === 304) {
                 try {
-                    if (buffer.length !== 0) {
-                        throw new Error('Unexpected response body on status code 304');
-                    }
-
                     // We can't reuse data object from the validation step because it might change
                     previousData = await this.cache.get(url);
 
+                    if (!previousData) {
+                        resolve();
+                        return;
+                    }
+
                     if (previousData.method !== method) {
+                        // TODO: do not throw if this is not revalidation
                         throw new Error('Cache mismatch - please try again');
                     }
                 } catch (error) {
@@ -409,21 +441,28 @@ class HttpCache {
 
             // We need to clone only those request headers we really need
             let vary = {};
-            if (lifetime !== undefined && responseHeaders.vary) {
+            if (lifetime !== false && responseHeaders.vary) {
                 const varyHeaders = responseHeaders.vary.split(',').map(header => header.toLowerCase().trim());
-                
+
                 for (const header of varyHeaders) {
                     vary[header] = requestHeaders[header];
                 }
             }
 
             try {
-                if (lifetime !== undefined) {
+                if (lifetime !== false) {
                     // The ID changes on refresh
                     const id = previousData ? previousData.id : random();
 
                     // We need to clone all the response headers
-                    responseHeaders = {...responseHeaders};
+                    if (previousData) {
+                        responseHeaders = {
+                            ...previousData.responseHeaders,
+                            ...responseHeaders
+                        };
+                    } else {
+                        responseHeaders = {...responseHeaders};
+                    }
 
                     // Fix the date
                     responseHeaders.date = getDate(responseHeaders.date, requestTime);
@@ -459,8 +498,6 @@ class HttpCache {
 
                     if (statusCode !== 304) {
                         await this.cache.set(`buffer|${url}`, [id, buffer]);
-                    } else {
-                        resolve();
                     }
                 } else {
                     // Remove the response from cache if it's not cacheable anymore
@@ -471,19 +508,20 @@ class HttpCache {
                             await this.cache.delete(`buffer|${url}`);
                             await this.cache.delete(url);
                         } catch (error) {
+                            this.error = error;
                             onError(error);
                         }
                     });
+                }
 
-                    if (statusCode === 304) {
-                        resolve();
-                    }
+                if (statusCode === 304) {
+                    resolve();
                 }
             } catch (error) {
                 this.processing.delete(url);
 
                 if (statusCode === 304) {
-                    cacheError = error;
+                    this.error = error;
                     resolve();
                     return;
                 }
@@ -500,12 +538,16 @@ class HttpCache {
                     throw cacheError;
                 }
 
+                if (this.error) {
+                    throw this.error;
+                }
+
                 let result;
                 if (removing) {
-                    // TODO: this should wait for the removal first
+                    // TODO: this should wait for the removal first, edit: maybe no?
                     result = await this.get(url, method, requestHeaders);
-                } else {
-                    result = await this.retrieve(url, requestCacheControl, data || previousData);
+                } else if (data) {
+                    result = await this.retrieve(url, requestCacheControl, data);
                 }
 
                 if (result === undefined) {
