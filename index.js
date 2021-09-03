@@ -136,20 +136,32 @@ class HttpCache {
 
     onError() {}
 
-    setRevalidationHeaders(headers, responseHeaders) {
+    setRevalidationHeaders(method, headers, responseHeaders) {
         // TODO: in the future caches will be able to independently perform validation
         //       https://httpwg.org/http-core/draft-ietf-httpbis-cache-latest.html#rfc.section.4.3.1
 
-        headers['if-modified-since'] = responseHeaders['last-modified'] || responseHeaders.date;
+        // https://datatracker.ietf.org/doc/html/rfc2616#section-13.3.3
+        const acceptsWeak = method === 'GET' || method === 'HEAD';
 
         const {etag} = responseHeaders;
         if (etag) {
-            headers['if-none-match'] = etag;
+            const strong = etag[0] === 'W' && etag[1] === '/';
+
+            if (acceptsWeak || strong) {
+                headers['if-none-match'] = etag;
+            }
+        } else if (acceptsWeak) {
+            headers['if-modified-since'] = responseHeaders['last-modified'] || responseHeaders.date;
         }
     }
 
     action(data, parsedCacheControl, method, headers) {
         if (!data || data.method !== method) {
+            return 'MISS';
+        }
+
+        // Unsupported
+        if (headers['if-match'] || headers['if-unmodified-since'] || headers['if-range']) {
             return 'MISS';
         }
 
@@ -209,7 +221,7 @@ class HttpCache {
         }
 
         if (action === 'REVALIDATE') {
-            this.setRevalidationHeaders(headers, data.responseHeaders);
+            this.setRevalidationHeaders(method, headers, data.responseHeaders);
         } else if (action === 'HIT') {
             return this.retrieve(url, data);
         } else if (action !== 'MISS') {
