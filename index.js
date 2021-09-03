@@ -41,7 +41,7 @@ const withoutHopByHop = headers => {
     const hopByHop = headers.connection ? headers.connection.split(',').map(header => header.trim()) : '';
 
     for (const header in headers) {
-        if (!hopByHop.includes(header) && !isHopByHop(header)) {
+        if (!isHopByHop(header) && !hopByHop.includes(header)) {
             newHeaders[header] = headers[header];
         }
     }
