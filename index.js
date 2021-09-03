@@ -22,6 +22,33 @@ const cloneStream = stream => {
 // Use crypto.randomUUID() when targeting Node.js 15
 const random = () => Math.random().toString(36).slice(2);
 
+// https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers
+const isHopByHop = header => {
+    return  header === 'connection' ||
+            header === 'keep-alive' ||
+            header === 'proxy-authenticate' ||
+            header === 'proxy-authorization' ||
+            header === 'te' ||
+            header === 'trailer' ||
+            header === 'transfer-encoding' ||
+            header === 'upgrade';
+};
+
+const withoutHopByHop = headers => {
+    const newHeaders = {};
+
+    // https://datatracker.ietf.org/doc/html/rfc7230#section-6.1
+    const hopByHop = headers.connection ? headers.connection.split(',').map(header => header.trim()) : '';
+
+    for (const header in headers) {
+        if (!hopByHop.includes(header) && !isHopByHop(header)) {
+            newHeaders[header] = headers[header];
+        }
+    }
+
+    return newHeaders;
+};
+
 // https://datatracker.ietf.org/doc/html/rfc7231#section-4.2.3
 const isMethodCacheable = method => {
     return method === 'GET' || method === 'HEAD' || method === 'POST';
@@ -34,6 +61,9 @@ const isMethodUnsafe = method => {
             method !== 'OPTIONS' &&
             method !== 'TRACE';
 };
+
+// https://datatracker.ietf.org/doc/html/rfc6585
+// 428, 429, 431, 511 MUST NOT be stored by a cache.
 
 // https://datatracker.ietf.org/doc/html/rfc7231#section-6.1
 // 206 is hard to implement: https://datatracker.ietf.org/doc/html/rfc7234#section-3.1
@@ -48,6 +78,8 @@ const isHeuristicStatusCode = statusCode => {
             statusCode === 405 ||
             statusCode === 410 ||
             statusCode === 414 ||
+            statusCode === 421 ||
+            statusCode === 451 ||
             statusCode === 501;
 };
 
@@ -166,7 +198,7 @@ class HttpCache {
         const data = await this.cache.get(url);
 
         const parsedCacheControl = parseCacheControl(headers['cache-control']);
-        const action = this.action(data, parsedCacheControl, method, headers);
+        const action = this.action(data, parsedCacheControl, method, withoutHopByHop(headers));
 
         if (action !== 'HIT' && parsedCacheControl['only-if-cached'] === '') {
             return {
@@ -206,7 +238,7 @@ class HttpCache {
         // Warning header has been deprecated, no need to modify it.
         return {
             statusCode,
-            responseHeaders: {...responseHeaders},
+            responseHeaders: withoutHopByHop(responseHeaders),
             buffer: Buffer.from(buffer)
         };
     }
@@ -335,6 +367,11 @@ class HttpCache {
             heuristic = true;
 
             do {
+                // https://datatracker.ietf.org/doc/html/rfc7231#section-4.3.3
+                if (method === 'POST') {
+                    break;
+                }
+
                 // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
                 const hashIndex = url.indexOf('#');
                 const queryIndex = url.indexOf('?');
@@ -471,7 +508,7 @@ class HttpCache {
                         heuristic,
 
                         method,
-                        statusCode,
+                        statusCode: previousData ? previousData.statusCode : statusCode,
                         responseHeaders,
 
                         vary,
@@ -539,6 +576,8 @@ class HttpCache {
                 if (result === undefined) {
                     // TODO: what to do here?
                 }
+
+                // TODO: missing age header
 
                 return result;
             };
