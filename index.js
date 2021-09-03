@@ -96,7 +96,7 @@ class HttpCache {
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.2
         this.heuristicFraction = 0.1;
-        this.maxHeuristic = Number.POSITIVE_INFINITY;
+        this.maxHeuristic = 86400; // 24h
 
         this.processing = new Set();
         this.removeOnInvalidation = true;
@@ -116,9 +116,7 @@ class HttpCache {
         }
     }
 
-    action(data, method, headers) {
-        const parsedCacheControl = parseCacheControl(headers['cache-control']);
-
+    action(data, parsedCacheControl, method, headers) {
         if (!data || data.method !== method) {
             return 'MISS';
         }
@@ -135,14 +133,19 @@ class HttpCache {
         }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
-        const now = Date.now();
-        const residentTime = now - responseTime;
-        const currentAge = correctedInitialAge + residentTime;
+        const residentTime = Date.now() - data.responseTime;
+        const currentAge = data.correctedInitialAge + residentTime;
         const age = Math.floor(currentAge / 1000);
 
-        const maxAge = parsedCacheControl['max-age'] || lifetime;
-        const minFresh = parsedCacheControl['min-fresh'] || 0;
+        if (data.revalidateOnStale && age > data.lifetime) {
+            return 'REVALIDATE';
+        }
+
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.1
+        const maxAge = parsedCacheControl['max-age'] || data.lifetime;
+
         // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.2
+        const minFresh = parsedCacheControl['min-fresh'] || 0;
         const maxStale = parsedCacheControl['max-stale'] || (parsedCacheControl['max-stale'] === '' ? Number.POSITIVE_INFINITY : 0);
         const ttl = maxAge - age;
 
@@ -151,17 +154,19 @@ class HttpCache {
                 return 'REVALIDATE';
             }
 
-            return 'REMOVE';
+            return 'MISS';
         }
 
-        responseHeaders.age = String(age);
+        data.responseHeaders.age = String(age);
 
         return 'HIT';
     }
 
     async get(url, method, headers) {
         const data = await this.cache.get(url);
-        const action = this.action(data, method, headers);
+
+        const parsedCacheControl = parseCacheControl(headers['cache-control']);
+        const action = this.action(data, parsedCacheControl, method, headers);
 
         if (action !== 'HIT' && parsedCacheControl['only-if-cached'] === '') {
             return {
@@ -173,49 +178,15 @@ class HttpCache {
 
         if (action === 'REVALIDATE') {
             this.setRevalidationHeaders(headers, data.responseHeaders);
-        } else if (action === 'REMOVE') {
-            await this.cache.delete(`buffer|${url}`);
-            await this.cache.delete(url);
         } else if (action === 'HIT') {
-            return this.retrieve(url, parsedCacheControl, data);
+            return this.retrieve(url, data);
         } else if (action !== 'MISS') {
             throw new Error(`Unknown cache action: ${action}`);
         }
     }
 
-    async retrieve(url, parsedCacheControl, data) {
-        const {
-            id,
-
-            responseTime,
-            correctedInitialAge,
-            lifetime,
-
-            statusCode,
-            responseHeaders,
-
-            revalidateOnStale
-        } = data;
-
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
-        const now = Date.now();
-        const residentTime = now - responseTime;
-        const currentAge = correctedInitialAge + residentTime;
-        const age = Math.floor(currentAge / 1000);
-        responseHeaders.age = String(age);
-
-        const maxAge = parsedCacheControl['max-age'] || lifetime;
-        const ttl = maxAge - age;
-        const minFresh = parsedCacheControl['min-fresh'] || 0;
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.2
-        const maxStale = parsedCacheControl['max-stale'] || (parsedCacheControl['max-stale'] === '' ? Number.POSITIVE_INFINITY : 0);
-        const mustRemove = ttl <= minFresh && -ttl > maxStale;
-
-        if (mustRemove) {
-
-
-            return;
-        }
+    async retrieve(url, data) {
+        const {id, statusCode, responseHeaders} = data;
 
         const bufferData = await this.cache.get(`buffer|${url}`);
 
@@ -285,6 +256,7 @@ class HttpCache {
         }
     }
 
+    // TODO: refactor this
     process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime, onError) {
         // TODO: Cancel previous caching tasks instead of this check
         if (this.processing.has(url) && statusCode !== 304) {
@@ -297,13 +269,14 @@ class HttpCache {
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
         // @szmarczak: It makes sense to invalidate responses on some 5XX as well
         //             We can return cached responses but that's unsafe.
-        if (
+        const invalidated =
             isMethodUnsafe(method)
             && (
                 (statusCode >= 200 && statusCode < 400 && statusCode !== 304)
                 || (statusCode === 500 || statusCode === 502 || statusCode === 504 || statusCode === 507)
-            )
-        ) {
+            );
+
+        if (invalidated) {
             this.invalidate(url);
             this.invalidate(responseHeaders.location, url);
             this.invalidate(responseHeaders['content-location'], url);
@@ -560,7 +533,7 @@ class HttpCache {
                     // TODO: this should wait for the removal first, edit: maybe no?
                     result = await this.get(url, method, requestHeaders);
                 } else if (data) {
-                    result = await this.retrieve(url, requestCacheControl, data);
+                    result = await this.retrieve(url, data);
                 }
 
                 if (result === undefined) {
