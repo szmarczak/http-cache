@@ -90,6 +90,7 @@ const isCacheControlAuthorizationOk = (isShared, authenticated, responseCacheCon
 
 class HttpCache {
     constructor(cache = new Map()) {
+        // Disk or RAM cache
         this.cache = cache;
         this.shared = true;
 
@@ -99,11 +100,14 @@ class HttpCache {
 
         this.processing = new Set();
         this.removeOnInvalidation = true;
-
-        this.error = undefined;
     }
 
-    _setRevalidationHeaders(headers, responseHeaders) {
+    onError() {}
+
+    setRevalidationHeaders(headers, responseHeaders) {
+        // TODO: in the future caches will be able to independently perform validation
+        //       https://httpwg.org/http-core/draft-ietf-httpbis-cache-latest.html#rfc.section.4.3.1
+
         headers['if-modified-since'] = responseHeaders['last-modified'] || responseHeaders.date;
 
         const {etag} = responseHeaders;
@@ -112,18 +116,54 @@ class HttpCache {
         }
     }
 
-    async get(url, method, headers) {
-        if (this.error) {
-            // TODO: regenrate stack trace here & in other places
-            throw this.error;
-        }
-
-        const data = await this.cache.get(url);
-
+    action(data, method, headers) {
         const parsedCacheControl = parseCacheControl(headers['cache-control']);
 
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.7
-        if ((!data || data.alwaysRevalidate || data.invalidated) && parsedCacheControl['only-if-cached'] === '') {
+        if (!data || data.method !== method) {
+            return 'MISS';
+        }
+
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
+        for (const [header, value] of Object.entries(data.vary)) {
+            if (value !== headers[header]) {
+                return 'MISS';
+            }
+        }
+
+        if (data.alwaysRevalidate || parsedCacheControl['no-cache'] === '' || data.invalidated) {
+            return 'REVALIDATE';
+        }
+
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
+        const now = Date.now();
+        const residentTime = now - responseTime;
+        const currentAge = correctedInitialAge + residentTime;
+        const age = Math.floor(currentAge / 1000);
+
+        const maxAge = parsedCacheControl['max-age'] || lifetime;
+        const minFresh = parsedCacheControl['min-fresh'] || 0;
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.2
+        const maxStale = parsedCacheControl['max-stale'] || (parsedCacheControl['max-stale'] === '' ? Number.POSITIVE_INFINITY : 0);
+        const ttl = maxAge - age;
+
+        if (ttl <= minFresh && -ttl > maxStale) {
+            if (data.revalidateOnStale) {
+                return 'REVALIDATE';
+            }
+
+            return 'REMOVE';
+        }
+
+        responseHeaders.age = String(age);
+
+        return 'HIT';
+    }
+
+    async get(url, method, headers) {
+        const data = await this.cache.get(url);
+        const action = this.action(data, method, headers);
+
+        if (action !== 'HIT' && parsedCacheControl['only-if-cached'] === '') {
             return {
                 statusCode: 504,
                 responseHeaders: {},
@@ -131,18 +171,16 @@ class HttpCache {
             };
         }
 
-        if (!data || data.method !== method) {
-            return;
+        if (action === 'REVALIDATE') {
+            this.setRevalidationHeaders(headers, data.responseHeaders);
+        } else if (action === 'REMOVE') {
+            await this.cache.delete(`buffer|${url}`);
+            await this.cache.delete(url);
+        } else if (action === 'HIT') {
+            return this.retrieve(url, parsedCacheControl, data);
+        } else if (action !== 'MISS') {
+            throw new Error(`Unknown cache action: ${action}`);
         }
-
-        if (data.alwaysRevalidate || parsedCacheControl['no-cache'] === '' || data.invalidated) {
-            // TODO: in the future caches will be able to independently perform validation
-            //       https://httpwg.org/http-core/draft-ietf-httpbis-cache-latest.html#rfc.section.4.3.1
-            this._setRevalidationHeaders(headers, data.responseHeaders);
-            return;
-        }
-
-        return this.retrieve(url, parsedCacheControl, data);
     }
 
     async retrieve(url, parsedCacheControl, data) {
@@ -156,16 +194,8 @@ class HttpCache {
             statusCode,
             responseHeaders,
 
-            vary,
             revalidateOnStale
         } = data;
-
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.1
-        for (const [header, value] of Object.entries(vary)) {
-            if (value !== headers[header]) {
-                return;
-            }
-        }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
         const now = Date.now();
@@ -178,24 +208,11 @@ class HttpCache {
         const ttl = maxAge - age;
         const minFresh = parsedCacheControl['min-fresh'] || 0;
         // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.2
-        const maxStale = parsedCacheControl['max-stale'] || (parsedCacheControl['max-stale'] === '' ? Infinity : 0);
+        const maxStale = parsedCacheControl['max-stale'] || (parsedCacheControl['max-stale'] === '' ? Number.POSITIVE_INFINITY : 0);
+        const mustRemove = ttl <= minFresh && -ttl > maxStale;
 
-        if (ttl <= minFresh && -ttl > maxStale) {
-            if (revalidateOnStale) {
-                this._setRevalidationHeaders(headers, responseHeaders);
-                return;
-            }
+        if (mustRemove) {
 
-            if (age > lifetime) {
-                try {
-                    await this.cache.delete(`buffer|${url}`);
-                    await this.cache.delete(url);
-                } catch (error) {
-                    this.error = error;
-
-                    throw error;
-                }
-            }
 
             return;
         }
@@ -204,13 +221,7 @@ class HttpCache {
 
         if (!bufferData) {
             // Cache error, remove the entry.
-            try {
-                await this.cache.delete(url);
-            } catch (error) {
-                this.error = error;
-
-                throw error;
-            }
+            await this.cache.delete(url);
             return;
         }
 
@@ -229,40 +240,48 @@ class HttpCache {
         };
     }
 
-    async _invalidate(url, baseUrl) {
+    async invalidate(url, baseUrl) {
+        if (!url) {
+            return;
+        }
+
         if (baseUrl) {
             try {
                 url = (new URL(url, baseUrl)).href;
-            } catch {}
-        }
-
-        if (this.removeOnInvalidation) {
-            try {
-                await this.cache.delete(`buffer|${url}`);
-                await this.cache.delete(url);
-            } catch (error) {
-                this.error = error;
-
-                throw error;
+                baseUrl = new URL(baseUrl);
+            } catch {
+                return;
             }
 
-            return;
+            // However, a cache MUST NOT invalidate a URI from a Location or
+            // Content-Location response header field if the host part of that URI
+            // differs from the host part in the effective request URI (Section 5.5
+            // of [RFC7230]).  This helps prevent denial-of-service attacks.
+            if (url.origin !== baseUrl.origin) {
+                return;
+            }
         }
 
-        const data = await this.cache.get(url);
-
-        if (!data) {
-            return;
-        }
-
-        data.invalidated = true;
+        url = String(url);
 
         try {
+            if (this.removeOnInvalidation) {
+                await this.cache.delete(`buffer|${url}`);
+                await this.cache.delete(url);
+
+                return;
+            }
+    
+            const data = await this.cache.get(url);
+    
+            if (!data) {
+                return;
+            }
+    
+            data.invalidated = true;
             await this.cache.set(url, data);
         } catch (error) {
-            this.error = error;
-
-            throw error;
+            this.onError(error);
         }
     }
 
@@ -272,28 +291,22 @@ class HttpCache {
             return;
         }
 
-        // TODO: optionally return cached responses on 5XX unless must-revalidate
         // TODO: freshening responses with HEAD
         // TODO: content-length mismatch on HEAD invalidates the cached response
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
-        // @szmarczak: It makes sense to invalidate responses on some 5XX as well.
-        const invalidated = isMethodUnsafe(method) && ((statusCode >= 200 && statusCode < 400 && statusCode !== 304) || (statusCode === 500 || statusCode === 502 || statusCode === 504 || statusCode === 507));
-        if (invalidated) {
-            const {location, 'content-location': contentLocation} = responseHeaders;
-
-            [
-                this._invalidate(url),
-                location ? this._invalidate(location, url) : undefined,
-                contentLocation ? this._invalidate(contentLocation, url) : undefined
-            ].map(promise => promise.catch(onError));
-
-            // However, a cache MUST NOT invalidate a URI from a Location or
-            // Content-Location response header field if the host part of that URI
-            // differs from the host part in the effective request URI (Section 5.5
-            // of [RFC7230]).  This helps prevent denial-of-service attacks.
-            //
-            // @szmarczak: This paragraph makes no sense for origins that represent storages.
+        // @szmarczak: It makes sense to invalidate responses on some 5XX as well
+        //             We can return cached responses but that's unsafe.
+        if (
+            isMethodUnsafe(method)
+            && (
+                (statusCode >= 200 && statusCode < 400 && statusCode !== 304)
+                || (statusCode === 500 || statusCode === 502 || statusCode === 504 || statusCode === 507)
+            )
+        ) {
+            this.invalidate(url);
+            this.invalidate(responseHeaders.location, url);
+            this.invalidate(responseHeaders['content-location'], url);
         }
 
         if (!isMethodCacheable(method)) {
@@ -558,6 +571,8 @@ class HttpCache {
             };
         }
     }
+
+    static parseCacheControl = parseCacheControl;
 }
 
 const cache = new HttpCache();
