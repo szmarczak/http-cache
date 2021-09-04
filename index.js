@@ -143,17 +143,11 @@ class HttpCache {
         this.removeOnInvalidation = true;
 
         // https://datatracker.ietf.org/doc/html/rfc8246
-        // Mozilla submitted an RFC for an `immutable` extension,
-        // which makes no sense at all for properly implemented caches.
+        // The `immutable` extension made sense when browsers were behaving
+        // like the `no-cache` directive was always set.
         //
-        // Firefox behaves like a `no-cache` response directive is set,
-        // even though it is missing in the response.
-        //
-        // So the meaning of `immutable` in the RFC is moot.
-        // It should rather be: do not default to `no-cache`.
-        //
-        // Chrome does this properly (no need for `immutable`):
-        // https://bugs.chromium.org/p/chromium/issues/detail?id=611416#c12
+        // This is not the case anymore, therefore the directive is moot now.
+        // See https://bugs.chromium.org/p/chromium/issues/detail?id=611416#c12
     }
 
     onError() {}
