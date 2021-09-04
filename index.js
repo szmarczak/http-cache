@@ -1,14 +1,10 @@
 'use strict';
+// Can't use ESM yet - need coverage.
 const {EventEmitter} = require('events');
 const parseCacheControl = require('./parse-cache-control');
 
-// Do not use ESM here. We need coverage.
-
-const {on} = EventEmitter.prototype;
-
-// TODO: https://www.iana.org/assignments/http-cache-directives/http-cache-directives.xhtml
-
 // Big thanks to @ronag - https://github.com/nodejs/node/issues/39632#issuecomment-891739612
+const {on} = EventEmitter.prototype;
 const cloneStream = stream => {
     const chunks = [];
 
