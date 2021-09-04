@@ -22,6 +22,19 @@ const cloneStream = stream => {
 // Use crypto.randomUUID() when targeting Node.js 15
 const random = () => Math.random().toString(36).slice(2);
 
+// A small utility that returns `undefined` for non-finite numbers
+const toNumber = x => {
+    if (x === undefined) {
+        return;
+    }
+
+    const parsed = Number.parseInt(x);
+
+    if (Number.isFinite(parsed)) {
+        return parsed;
+    }
+};
+
 // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers
 const isHopByHop = header => {
     return  header === 'connection' ||
@@ -114,10 +127,10 @@ const isCacheControlAuthorizationOk = (isShared, authenticated, responseCacheCon
 
     return  responseCacheControl['public'] === '' ||
             responseCacheControl['must-revalidate'] === '' ||
-            responseCacheControl['max-age'] ||
+            toNumber(responseCacheControl['max-age']) !== undefined ||
             // Shared cache only:
             responseCacheControl['proxy-revalidate'] === '' ||
-            responseCacheControl['s-maxage'];
+            toNumber(responseCacheControl['s-maxage']) !== undefined;
 };
 
 class HttpCache {
@@ -132,6 +145,19 @@ class HttpCache {
 
         this.processing = new Set();
         this.removeOnInvalidation = true;
+
+        // https://datatracker.ietf.org/doc/html/rfc8246
+        // Mozilla submitted an RFC for an `immutable` extension,
+        // which makes no sense at all for properly implemented caches.
+        //
+        // Firefox behaves like a `no-cache` response directive is set,
+        // even though it is missing in the response.
+        //
+        // So the meaning of `immutable` in the RFC is moot.
+        // It should rather be: do not default to `no-cache`.
+        //
+        // Chrome does this properly (no need for `immutable`):
+        // https://bugs.chromium.org/p/chromium/issues/detail?id=611416#c12
     }
 
     onError() {}
@@ -186,14 +212,21 @@ class HttpCache {
         }
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.1
-        const maxAge = parsedCacheControl['max-age'] || data.lifetime;
+        const maxAge = toNumber(parsedCacheControl['max-age']) ?? data.lifetime;
 
         // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.1.2
-        const minFresh = parsedCacheControl['min-fresh'] || 0;
-        const maxStale = parsedCacheControl['max-stale'] || (parsedCacheControl['max-stale'] === '' ? Number.POSITIVE_INFINITY : 0);
+        const minFresh = toNumber(parsedCacheControl['min-fresh']) ?? 0;
+        const maxStale = (parsedCacheControl['max-stale'] === '' ? Number.POSITIVE_INFINITY : (toNumber(parsedCacheControl['max-stale']) ?? 0));
+
+        // https://datatracker.ietf.org/doc/html/rfc5861
+        const staleWhileRevalidate = toNumber(parsedCacheControl['stale-while-revalidate']);
+        const staleIfError = toNumber(parsedCacheControl['stale-if-error']);
+
+        // These extensions aren't supported but we can read information from them
+        const correctMaxStale = maxStale ?? staleWhileRevalidate ?? staleIfError;
         const ttl = maxAge - age;
 
-        if (ttl <= minFresh && -ttl > maxStale) {
+        if (ttl <= minFresh && -ttl > correctMaxStale) {
             if (data.revalidateOnStale) {
                 return 'REVALIDATE';
             }
@@ -357,20 +390,18 @@ class HttpCache {
             responseHeaders.vary === '*'
         ) {
             lifetime = false;
+        } else if (responseCacheControl['no-cache'] === '') {
+            lifetime = 0;
         } else if (this.shared && responseCacheControl['s-maxage']) {
             responseCacheControl['proxy-revalidate'] = '';
 
-            const parsed = Number(responseCacheControl['s-maxage']);
-
-            lifetime = Number.isNaN(parsed) ? false : parsed;
+            lifetime = toNumber(responseCacheControl['s-maxage']) ?? false;
         } else if (responseCacheControl['max-age']) {
-            const parsed = Number(responseCacheControl['max-age']);
-
-            lifetime = Number.isNaN(parsed) ? false : parsed;
+            lifetime = toNumber(responseCacheControl['max-age']) ?? false;
         } else if (responseHeaders.expires) {
             const parsed = Date.parse(responseHeaders.expires);
 
-            lifetime = Number.isNaN(parsed) ? 0 : (now - parsed);
+            lifetime = !Number.isFinite(parsed) ? 0 : (now - parsed);
         } else if (
             isHeuristicStatusCode(statusCode) ||
             responseCacheControl['public'] === '' ||
@@ -508,7 +539,7 @@ class HttpCache {
                     const responseTime = now;
                     const apparentAge = Math.max(0, responseTime - dateValue);
                     const responseDelay = responseTime - requestTime;
-                    const ageValue = Number(responseHeaders.age) || 0;
+                    const ageValue = toNumber(responseHeaders.age) ?? 0;
                     const correctedAgeValue = ageValue + responseDelay;
                     const correctedInitialAge = Math.max(apparentAge, correctedAgeValue);
 
@@ -603,7 +634,6 @@ class HttpCache {
 const cache = new HttpCache();
 
 const https = require('https');
-const assert = require('assert');
 const url = 'https://szmarczak.com/foobar.txt';
 
 const request = async (url, options = { headers: {} }) => {
