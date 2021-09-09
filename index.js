@@ -336,34 +336,7 @@ class HttpCache {
             );
     }
 
-    // TODO: refactor this
-    process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime, onError) {
-        // TODO: Cancel previous caching tasks instead of this check
-        if (this.processing.has(url) && statusCode !== 304) {
-            return;
-        }
-
-        if (this.shouldInvalidate(method, statusCode)) {
-            this.invalidate(url);
-            this.invalidate(responseHeaders.location, url);
-            this.invalidate(responseHeaders['content-location'], url);
-        }
-
-        if (!isMethodCacheable(method)) {
-            return;
-        }
-
-        // Parse lifetime
-        const responseCacheControl = parseCacheControl(responseHeaders['cache-control']);
-        const requestCacheControl = parseCacheControl(requestHeaders['cache-control']);
-
-        if (!isCacheControlAuthorizationOk(this.shared, 'authorization' in requestHeaders, responseCacheControl)) {
-            return;
-        }
-
-        const now = Date.now();
-        let heuristic = false;
-
+    calculateLifetime(method, statusCode, responseHeaders, requestCacheControl, responseCacheControl) {
         // Lifetime legend:
         // undefined - update on 304
         // false     - remove
@@ -391,14 +364,12 @@ class HttpCache {
         } else if (responseHeaders.expires) {
             const parsed = Date.parse(responseHeaders.expires);
 
-            lifetime = !Number.isFinite(parsed) ? 0 : (now - parsed);
+            lifetime = !Number.isFinite(parsed) ? 0 : (Date.now() - parsed);
         } else if (
             isHeuristicStatusCode(statusCode) ||
             responseCacheControl['public'] === '' ||
             (!this.shared && 'private' in responseCacheControl)
         ) {
-            heuristic = true;
-
             do {
                 // https://datatracker.ietf.org/doc/html/rfc7231#section-4.3.3
                 if (method === 'POST') {
@@ -428,9 +399,39 @@ class HttpCache {
                     break;
                 }
 
-                lifetime = Math.floor(Math.min(this.maxHeuristic, (now - parsed) * this.heuristicFraction));
+                lifetime = Math.floor(Math.min(this.maxHeuristic, (Date.now() - parsed) * this.heuristicFraction));
             } while (false);
         }
+
+        return lifetime;
+    }
+
+    // TODO: refactor this
+    process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime, onError) {
+        // TODO: Cancel previous caching tasks instead of this check
+        if (this.processing.has(url) && statusCode !== 304) {
+            return;
+        }
+
+        if (this.shouldInvalidate(method, statusCode)) {
+            this.invalidate(url);
+            this.invalidate(responseHeaders.location, url);
+            this.invalidate(responseHeaders['content-location'], url);
+        }
+
+        if (!isMethodCacheable(method)) {
+            return;
+        }
+
+        // Parse lifetime
+        const responseCacheControl = parseCacheControl(responseHeaders['cache-control']);
+        const requestCacheControl = parseCacheControl(requestHeaders['cache-control']);
+
+        if (!isCacheControlAuthorizationOk(this.shared, 'authorization' in requestHeaders, responseCacheControl)) {
+            return;
+        }
+
+        let lifetime = this.calculateLifetime(method, statusCode, responseHeaders, requestCacheControl, responseCacheControl);
 
         if (lifetime === undefined && statusCode !== 304) {
             return;
@@ -526,7 +527,7 @@ class HttpCache {
 
                     // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3
                     const dateValue = Date.parse(responseHeaders.date);
-                    const responseTime = now;
+                    const responseTime = Date.now();
                     const apparentAge = Math.max(0, responseTime - dateValue);
                     const responseDelay = responseTime - requestTime;
                     const ageValue = toNumber(responseHeaders.age) ?? 0;
@@ -539,7 +540,6 @@ class HttpCache {
                         responseTime,
                         correctedInitialAge,
                         lifetime,
-                        heuristic,
 
                         method,
                         statusCode: previousData ? previousData.statusCode : statusCode,
