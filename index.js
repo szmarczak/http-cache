@@ -3,6 +3,9 @@
 const {EventEmitter} = require('events');
 const parseCacheControl = require('./parse-cache-control');
 
+// TODO: freshening responses with HEAD
+// TODO: content-length mismatch on HEAD invalidates the cached response
+
 // Big thanks to @ronag - https://github.com/nodejs/node/issues/39632#issuecomment-891739612
 const {on} = EventEmitter.prototype;
 const cloneStream = stream => {
@@ -323,6 +326,16 @@ class HttpCache {
         }
     }
 
+    shouldInvalidate(method, statusCode) {
+        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
+        return isMethodUnsafe(method)
+            && (
+                (statusCode >= 200 && statusCode < 400 && statusCode !== 304)
+                // These status codes do not guarantee the request hasn't been processed
+                || (statusCode === 500 || statusCode === 502 || statusCode === 504 || statusCode === 507)
+            );
+    }
+
     // TODO: refactor this
     process(url, method, requestHeaders, statusCode, responseHeaders, stream, requestTime, onError) {
         // TODO: Cancel previous caching tasks instead of this check
@@ -330,20 +343,7 @@ class HttpCache {
             return;
         }
 
-        // TODO: freshening responses with HEAD
-        // TODO: content-length mismatch on HEAD invalidates the cached response
-
-        // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
-        // @szmarczak: It makes sense to invalidate responses on some 5XX as well
-        //             We can return cached responses but that's unsafe.
-        const invalidated =
-            isMethodUnsafe(method)
-            && (
-                (statusCode >= 200 && statusCode < 400 && statusCode !== 304)
-                || (statusCode === 500 || statusCode === 502 || statusCode === 504 || statusCode === 507)
-            );
-
-        if (invalidated) {
+        if (this.shouldInvalidate(method, statusCode)) {
             this.invalidate(url);
             this.invalidate(responseHeaders.location, url);
             this.invalidate(responseHeaders['content-location'], url);
@@ -548,7 +548,7 @@ class HttpCache {
                         vary,
                         alwaysRevalidate: 'no-cache' in responseCacheControl,
                         revalidateOnStale: responseCacheControl['must-revalidate'] === '' || (this.shared && responseCacheControl['proxy-revalidate'] === ''),
-                        invalidated
+                        invalidated: false,
                     };
 
                     await this.cache.set(url, data);
