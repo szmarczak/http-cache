@@ -326,7 +326,7 @@ class HttpCache {
         }
     }
 
-    shouldInvalidate(method, statusCode) {
+    shouldInvalidate({method, statusCode}) {
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.4
         return isMethodUnsafe(method)
             && (
@@ -336,7 +336,19 @@ class HttpCache {
             );
     }
 
-    calculateLifetime(method, statusCode, responseHeaders, requestCacheControl, responseCacheControl) {
+    calculateLifetime({method, statusCode, responseHeaders, responseCacheControl, requestHeaders, requestCacheControl }) {
+        if (!isMethodCacheable(method)) {
+            return {
+                state: 'SKIP'
+            };
+        }
+
+        if (!isCacheControlAuthorizationOk(this.shared, 'authorization' in requestHeaders, responseCacheControl)) {
+            return {
+                state: 'SKIP'
+            };
+        }
+
         // Lifetime legend:
         // undefined - update on 304
         // false     - remove
@@ -382,7 +394,7 @@ class HttpCache {
                 const queryIndex = url.indexOf('?');
                 const hasQuery = hashIndex === -1 ? queryIndex !== -1 : (queryIndex < hashIndex);
                 if (hasQuery) {
-                    lifetime = 'no-cache' in responseCacheControl ? 0 : false;
+                    lifetime = false;
                     break;
                 }
 
@@ -403,7 +415,28 @@ class HttpCache {
             } while (false);
         }
 
-        return lifetime;
+        if (lifetime === false) {
+            return {
+                state: 'INVALIDATE',
+            };
+        }
+
+        if (lifetime === undefined) {
+            if (statusCode === 304) {
+                return {
+                    state: 'CACHEABLE',
+                };
+            }
+
+            return {
+                state: 'SKIP',
+            };
+        }
+
+        return {
+            state: 'CACHEABLE',
+            lifetime,
+        };
     }
 
     // TODO: refactor this
@@ -413,34 +446,33 @@ class HttpCache {
             return;
         }
 
-        if (this.shouldInvalidate(method, statusCode)) {
+        const responseCacheControl = parseCacheControl(responseHeaders['cache-control']);
+        const requestCacheControl = parseCacheControl(requestHeaders['cache-control']);
+
+        let {lifetime, state} = this.calculateLifetime({
+            method,
+            statusCode,
+            responseHeaders,
+            responseCacheControl,
+            requestHeaders,
+            requestCacheControl,
+        });
+
+        if (state !== 'SKIP' && state !== 'INVALIDATE' && state !== 'CACHEABLE') {
+            throw new Error(`Invalid lifetime state: ${state}`);
+        }
+
+        if (this.shouldInvalidate({method, statusCode}) || state === 'INVALIDATE') {
             this.invalidate(url);
             this.invalidate(responseHeaders.location, url);
             this.invalidate(responseHeaders['content-location'], url);
         }
 
-        if (!isMethodCacheable(method)) {
-            return;
-        }
-
-        // Parse lifetime
-        const responseCacheControl = parseCacheControl(responseHeaders['cache-control']);
-        const requestCacheControl = parseCacheControl(requestHeaders['cache-control']);
-
-        if (!isCacheControlAuthorizationOk(this.shared, 'authorization' in requestHeaders, responseCacheControl)) {
-            return;
-        }
-
-        let lifetime = this.calculateLifetime(method, statusCode, responseHeaders, requestCacheControl, responseCacheControl);
-
-        if (lifetime === undefined && statusCode !== 304) {
+        if (state !== 'CACHEABLE') {
             return;
         }
 
         // Invalid lifetime
-        if (lifetime < 0) {
-            lifetime = 0;
-        }
 
         // Let the processing begin
         this.processing.add(url);
