@@ -1,11 +1,26 @@
 {
   "name": "http-cache",
   "version": "1.0.0",
-  "description": "",
+  "description": "Client implementation of RFC 9111",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "author": "Szymon Marczak",
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/szmarczak/http-cache.git"
+  },
+  "keywords": ["http", "http2", "http3", "cache", "caching", "rfc9111"],
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/szmarczak/http-cache/issues"
+  },
+  "homepage": "https://github.com/szmarczak/http-cache#readme",
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@typescript/native-preview": "^7.0.0-dev.20251205.1",
+    "typescript": "^5.9.3"
+  }
 }
