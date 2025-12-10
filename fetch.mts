@@ -1,4 +1,4 @@
-import type { Headers as HttpCacheHeaders, WebHeaders as HttpCacheWebHeaders } from './source/index.mts';
+import type { Headers as HttpCacheHeaders } from './source/index.mts';
 import { HttpCache, isResponse, intoFastSlowStreams, isRevalidationRequest } from './source/index.mts';
 
 export const storage = new Map<string, any>();
@@ -11,7 +11,7 @@ const fromCache = new WeakSet();
 export const isFromCache = (response: Response): boolean => fromCache.has(response);
 
 type HttpCacheRequestInit = Omit<RequestInit, 'headers' | 'cache'> & {
-    headers?: HttpCacheHeaders | HttpCacheWebHeaders,
+    headers?: HttpCacheHeaders | Headers,
     waitForCache?: boolean,
     cache?: HttpCache,
 };
@@ -45,7 +45,7 @@ export const f = async (requestInfo: string, requestInit?: HttpCacheRequestInit)
     const response = await fetch(requestInfo, {
         ...requestInit,
         cache: 'no-store',
-        headers: (revalidationHeaders ?? requestHeaders) as Record<string, string>,
+        headers: revalidationHeaders ?? requestHeaders,
     });
 
     const responseTime = Date.now();
@@ -75,7 +75,11 @@ export const f = async (requestInfo: string, requestInit?: HttpCacheRequestInit)
         }
 
         // To prevent infinite loops, skip cache.
-        return await fetch(requestInfo, {...requestInit, cache: 'no-store', headers: requestHeaders as Record<string, string>});
+        return await fetch(requestInfo, {
+            ...requestInit,
+            cache: 'no-store',
+            headers: requestHeaders,
+        });
     }
 
     if (requestInit?.waitForCache) {

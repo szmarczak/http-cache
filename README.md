@@ -44,6 +44,7 @@ Note that the raw benchmarks are an upper bound (this is a stress test). In a re
 - [`no-transform`](https://www.rfc-editor.org/rfc/rfc9111.html#name-no-transform-2) has no effect, the cache never transforms anything.
 - [Duplicate](https://www.rfc-editor.org/rfc/rfc9111.html#appendix-B) `cache-control` directives result in the header being parsed as [`no-store`](https://www.rfc-editor.org/rfc/rfc9111.html#name-no-store-2).
 - [Cache extensions](https://www.rfc-editor.org/rfc/rfc9111.html#name-extension-directives) are not supported.
+- Response body that is required to be no-content (such as [`HEAD`](https://www.rfc-editor.org/rfc/rfc9110.html#name-head), [`204`](https://www.rfc-editor.org/rfc/rfc9110.html#name-204-no-content) and [`304`](https://www.rfc-editor.org/rfc/rfc9110.html#name-304-not-modified)) isn't read by the cache. Otherwise the response wouldn't get cached if the caller never reads the response body.
 - The backing storage must be used by only a single instance of `HttpCache`. If multiple instances use the same storage, this WILL cause breakage.
 
 ## Current limitations

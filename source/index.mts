@@ -10,10 +10,10 @@ import { toSafePositiveInteger } from './to-safe-positive-integer.mts';
 
 // https://fetch.spec.whatwg.org/#headers-class
 // Urgh, Headers may return null but plain object must not contain null!
-export type WebHeaders = {
-    has(header: string): boolean;
-    get(header: string): string | null;
-    keys(): Iterable<string>;
+type WebHeaders = {
+    has(header: string): boolean,
+    get(header: string): string | null,
+    keys(): Iterable<string>,
 };
 
 const isWebHeaders = (headers: Headers | WebHeaders): headers is WebHeaders =>
@@ -179,7 +179,7 @@ const canStore = (
 ): boolean => {
     // https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-cache-keys-with
     // A stored response with a Vary header field value containing a member "*" always fails to match.
-    if (vary === null || vary.includes('*')) {
+    if (vary !== null && vary.includes('*')) {
         return false;
     }
 
@@ -290,7 +290,9 @@ const isHopByHop = (header: string): header is HopByHop =>
         || header === 'proxy-authentication-info';
 
 // Fetch-like
-export type Headers = {[header: string]: string | undefined};
+export type Headers = {
+    [header: string]: string | undefined,
+};
 
 // Fetch-like
 export type Response = {
@@ -387,7 +389,9 @@ const shouldInvalidateCache = (oldMetadata: Metadata, responseHeaders: WebHeader
         || oldMetadata.responseHeaders['content-encoding'] !== responseHeaders.get('content-encoding');
 };
 
-type VaryHeaders = { [header: string]: string | null | undefined };
+type VaryHeaders = {
+    [header: string]: string | null | undefined,
+};
 
 // https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-cache-keys-with
 const parseVary = (vary: string | null, requestHeaders: WebHeaders): VaryHeaders => {
@@ -407,9 +411,9 @@ const parseVary = (vary: string | null, requestHeaders: WebHeaders): VaryHeaders
 };
 
 type Cache<T> = {
-    get(key: string): T | undefined | Promise<T | undefined>;
-    set(key: string, data: T): void | Promise<void> | Cache<T>;
-    delete(key: string): void | Promise<void> | boolean;
+    get(key: string): T | undefined | Promise<T | undefined>,
+    set(key: string, data: T): void | Promise<void> | Cache<T>,
+    delete(key: string): void | Promise<void> | boolean,
 };
 
 type Metadata = Readonly<{
@@ -507,7 +511,7 @@ export class HttpCache {
             const metadataKey = getMetadataKey(url);
             const metadata = await this.metadataCache.get(metadataKey);
 
-            if (metadata === undefined) {
+            if (metadata === undefined || metadata.invalidated) {
                 return;
             }
 
@@ -697,7 +701,7 @@ export class HttpCache {
             responseHeaders.has('authorization'),
             responseHeaders.get('cache-control'),
             responseHeaders.has('expires'),
-            responseHeaders.get('vary') ?? '',
+            responseHeaders.get('vary'),
             this.forceMustUnderstand,
         );
 
@@ -793,14 +797,12 @@ export class HttpCache {
 
         const blobKey = getBlobKey(metadata.id, url);
 
-        const buffer = stream === null ? null : (isNodeReadable(stream) ? await readNode(stream) : await readWeb(stream));
-        if (buffer === undefined) {
-            return;
-        }
-
         // https://www.rfc-editor.org/rfc/rfc9110#name-304-not-modified
         // A 304 response is terminated by the end of the header section; it cannot contain content or trailers.
-        if (statusCode === 304 && buffer !== null && buffer.length > 0) {
+        const noContent = stream === null || method === 'HEAD' || statusCode === 204 || statusCode === 304;
+
+        const buffer = noContent ? null : (isNodeReadable(stream) ? await readNode(stream) : await readWeb(stream));
+        if (buffer === undefined) {
             return;
         }
 
