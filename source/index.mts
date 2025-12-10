@@ -742,7 +742,7 @@ export class HttpCache {
                 return false;
             }
 
-            if (shouldInvalidateCache(oldMetadata, responseHeaders)) {
+            if (shouldInvalidateCache(oldMetadata, responseHeaders) && !oldMetadata.invalidated) {
                 try {
                     const newMetadata = { ...oldMetadata };
                     newMetadata.invalidated = true;
