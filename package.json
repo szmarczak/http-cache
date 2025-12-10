@@ -4,7 +4,8 @@
   "description": "Client implementation of RFC 9111",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "tsc": "tsc"
   },
   "author": "Szymon Marczak",
   "license": "MIT",

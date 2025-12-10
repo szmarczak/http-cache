@@ -8,7 +8,7 @@ export type Readable = {
 
 export const isNodeReadable = (stream: unknown): stream is Readable => typeof stream === 'object' && stream !== null && 'readableDidRead' in stream;
 
-const concat = (data: Uint8Array[]): Uint8Array => {
+const concat = (data: Uint8Array[]): Uint8Array<ArrayBuffer> => {
     const length = (() => {
         let length = 0;
 
@@ -33,7 +33,7 @@ const concat = (data: Uint8Array[]): Uint8Array => {
 };
 
 // Big thanks to @ronag - https://github.com/nodejs/node/issues/39632#issuecomment-891739612
-export const readNode = async (stream: Readable): Promise<Uint8Array | undefined> => {
+export const readNode = async (stream: Readable): Promise<Uint8Array<ArrayBuffer> | undefined> => {
     const { on, off, once } = (await import('node:events')).prototype;
 
     const chunks: Uint8Array[] = [];
@@ -44,7 +44,7 @@ export const readNode = async (stream: Readable): Promise<Uint8Array | undefined
 
     on.call(stream, 'data', queue);
 
-    const { promise, resolve } = Promise.withResolvers<Uint8Array | undefined>();
+    const { promise, resolve } = Promise.withResolvers<Uint8Array<ArrayBuffer> | undefined>();
 
     once.call(stream, 'close', () => {
         off.call(stream, 'data', queue);
@@ -101,7 +101,7 @@ export const intoFastSlowStreams = (reader: ReadableStreamDefaultReader<Uint8Arr
     return [a, b];
 };
 
-export const readWeb = async (stream: Iterable<Uint8Array> | AsyncIterable<Uint8Array>): Promise<Uint8Array | undefined> => {
+export const readWeb = async (stream: Iterable<Uint8Array> | AsyncIterable<Uint8Array>): Promise<Uint8Array<ArrayBuffer> | undefined> => {
     const chunks: Uint8Array[] = [];
 
     try {

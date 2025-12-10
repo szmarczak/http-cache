@@ -1,4 +1,3 @@
-import type { Headers as HttpCacheHeaders } from './source/index.mts';
 import { HttpCache, isResponse, intoFastSlowStreams, isRevalidationRequest } from './source/index.mts';
 
 export const storage = new Map<string, any>();
@@ -11,7 +10,7 @@ const fromCache = new WeakSet();
 export const isFromCache = (response: Response): boolean => fromCache.has(response);
 
 type HttpCacheRequestInit = Omit<RequestInit, 'headers' | 'cache'> & {
-    headers?: HttpCacheHeaders | Headers,
+    headers?: Record<string, string>,
     waitForCache?: boolean,
     cache?: HttpCache,
 };

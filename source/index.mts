@@ -291,12 +291,12 @@ const isHopByHop = (header: string): header is HopByHop =>
 
 // Fetch-like
 export type Headers = {
-    [header: string]: string | undefined,
+    [header: string]: string,
 };
 
 // Fetch-like
 export type Response = {
-    body: Uint8Array | null,
+    body: Uint8Array<ArrayBuffer> | null,
     status: number,
     headers: Headers,
 };
@@ -318,8 +318,8 @@ const withoutHopByHop = (responseHeaders: WebHeaders): Headers => {
     const hopByHop = connection !== null ? connection.split(',').map(header => header.trim()) : [];
 
     for (const header of responseHeaders.keys()) {
-        if (!isHopByHop(header) && !hopByHop.includes(header)) {
-            headers[header] = responseHeaders.get(header) ?? undefined;
+        if (!isHopByHop(header) && !hopByHop.includes(header) && responseHeaders.has(header)) {
+            headers[header] = responseHeaders.get(header)!;
         }
     }
 
