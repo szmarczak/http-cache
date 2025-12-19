@@ -383,10 +383,10 @@ const shouldInvalidateCache = (oldMetadata: Metadata, responseHeaders: WebHeader
 
     return oldMetadata.etag !== responseHeaders.get('etag')
         || oldMetadata.lastModified !== lastModified
-        || oldMetadata.responseHeaders['content-length'] !== responseHeaders.get('content-length')
-        || oldMetadata.responseHeaders['content-type'] !== responseHeaders.get('content-type')
-        || oldMetadata.responseHeaders['content-language'] !== responseHeaders.get('content-language')
-        || oldMetadata.responseHeaders['content-encoding'] !== responseHeaders.get('content-encoding');
+        || (responseHeaders.has('content-length')   && oldMetadata.responseHeaders['content-length']   !== responseHeaders.get('content-length'))
+        || (responseHeaders.has('content-type')     && oldMetadata.responseHeaders['content-type']     !== responseHeaders.get('content-type'))
+        || (responseHeaders.has('content-language') && oldMetadata.responseHeaders['content-language'] !== responseHeaders.get('content-language'))
+        || (responseHeaders.has('content-encoding') && oldMetadata.responseHeaders['content-encoding'] !== responseHeaders.get('content-encoding'));
 };
 
 type VaryHeaders = {
@@ -467,12 +467,12 @@ export const isResponse = (result: Response | RevalidationRequest | undefined): 
 };
 
 export class HttpCache {
-    metadataCache: MetadataCache;
-    blobCache: BlobCache;
+    readonly metadataCache: MetadataCache;
+    readonly blobCache: BlobCache;
 
-    shared: boolean = true;
-    forceMustUnderstand: boolean = false;
-    heuristicLifetime: number = 60 * 1000;
+    readonly shared: boolean = true;
+    readonly forceMustUnderstand: boolean = false;
+    readonly heuristicLifetime: number = 60 * 1000;
 
     error: unknown;
 
@@ -588,14 +588,20 @@ export class HttpCache {
             || (isStale && metadata.mustRevalidateStale)
             || (this.shared && isStale && metadata.sharedMustRevalidateStale);
 
+        // https://www.rfc-editor.org/rfc/rfc9111.html#name-max-stale
         const maxStale = toSafePositiveInteger(requestCacheControl['max-stale']);
         const acceptStale = maxStale !== undefined && maxStale >= stale;
 
+        // https://www.rfc-editor.org/rfc/rfc9111.html#name-min-fresh
         const minFresh = toSafePositiveInteger(requestCacheControl['min-fresh']);
         const freshEnough = (currentAge + (minFresh ?? 0)) < metadata.lifetime;
 
+        // https://www.rfc-editor.org/rfc/rfc9111.html#name-max-age
+        const maxAge = toSafePositiveInteger(requestCacheControl['max-age']);
+        const ageOk = maxAge === undefined || (currentAge <= maxAge);
+
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-validation
-        if (revalidate || (minFresh !== undefined && freshEnough) || (isStale && !acceptStale)) {
+        if (revalidate || (minFresh !== undefined && freshEnough) || (!ageOk || (isStale && !acceptStale))) {
             const revalidationHeaders: Headers = Object.create(null);
 
             // https://www.rfc-editor.org/rfc/rfc9111.html#name-sending-a-validation-reques
@@ -765,6 +771,11 @@ export class HttpCache {
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-freshening-stored-responses
         const invalidated = await tryInvalidate();
         if (invalidated) {
+            return;
+        }
+
+        // Do not refresh heuristically cacheable responses on HEAD
+        if (method === 'HEAD' && oldMetadata?.method === 'GET' && !responseHeaders.has('if-none-match') && !responseHeaders.has('if-modified-since')) {
             return;
         }
 

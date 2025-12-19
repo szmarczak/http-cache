@@ -10,7 +10,13 @@ const b = await f('https://szmarczak.com');
 const bBytes = await b.bytes();
 
 console.log(isFromCache(a), isFromCache(b));
-console.log(aBytes.length, bBytes.length, aBytes.length === bBytes.length, aBytes.every((byte, index) => byte === bBytes[index]));
+
+console.log(
+    aBytes.length,
+    bBytes.length,
+    aBytes.length === bBytes.length,
+    aBytes.every((byte, index) => byte === bBytes[index]),
+);
 
 // Inspect metadata
 console.log(storage.get('https://szmarczak.com'));

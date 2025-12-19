@@ -44,7 +44,13 @@ Note that the raw benchmarks are an upper bound (this is a stress test). In a re
 - [`no-transform`](https://www.rfc-editor.org/rfc/rfc9111.html#name-no-transform-2) has no effect, the cache never transforms anything.
 - [Duplicate](https://www.rfc-editor.org/rfc/rfc9111.html#appendix-B) `cache-control` directives result in the header being parsed as [`no-store`](https://www.rfc-editor.org/rfc/rfc9111.html#name-no-store-2).
 - [Cache extensions](https://www.rfc-editor.org/rfc/rfc9111.html#name-extension-directives) are not supported.
-- Response body that is required to be no-content (such as [`HEAD`](https://www.rfc-editor.org/rfc/rfc9110.html#name-head), [`204`](https://www.rfc-editor.org/rfc/rfc9110.html#name-204-no-content) and [`304`](https://www.rfc-editor.org/rfc/rfc9110.html#name-304-not-modified)) isn't read by the cache. Otherwise the response wouldn't get cached if the caller never reads the response body.
+- [Response body](https://www.rfc-editor.org/rfc/rfc9110.html#name-content) that is required to be no-content (such as [`HEAD`](https://www.rfc-editor.org/rfc/rfc9110.html#name-head), [`204`](https://www.rfc-editor.org/rfc/rfc9110.html#name-204-no-content) and [`304`](https://www.rfc-editor.org/rfc/rfc9110.html#name-304-not-modified)) isn't read by the cache. Otherwise the response wouldn't get cached if the caller never reads the response body.
+- [CDN Cache Control](https://www.rfc-editor.org/rfc/rfc9213.html) is not supported. This cache is not a CDN.
+- [Vary headers](https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-cache-keys-with) are not normalized due to complexity.
+- [Freshening](https://www.rfc-editor.org/rfc/rfc9111.html#name-freshening-stored-responses) is stricter. Validators are required to be exactly the same.
+- [Freshening Responses with HEAD](https://www.rfc-editor.org/rfc/rfc9111.html#name-freshening-responses-with-h) is disabled for heuristically cacheable responses. Validators are required in order to refresh with HEAD.
+- [Request directives](https://www.rfc-editor.org/rfc/rfc9111.html#name-request-directives) are strict, not advisory. If a `max-age`, `max-stale` or `min-fresh` request directive fails to match, a stored response will never be used.
+- [`stale-while-revalidate`](https://www.rfc-editor.org/rfc/rfc5861.html#section-3) and [`stale-if-error`](https://www.rfc-editor.org/rfc/rfc5861.html#section-4) are not yet implemented.
 - The backing storage must be used by only a single instance of `HttpCache`. If multiple instances use the same storage, this WILL cause breakage.
 
 ## Current limitations

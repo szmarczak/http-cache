@@ -41,53 +41,54 @@ export const f = async (requestInfo: string, requestInit?: HttpCacheRequestInit)
         ...cached.revalidationHeaders,
     } : undefined;
 
-    const response = await fetch(requestInfo, {
-        ...requestInit,
-        cache: 'no-store',
-        headers: revalidationHeaders ?? requestHeaders,
-    });
+    let revalidationFailed = false;
 
-    const responseTime = Date.now();
-
-    const [fastBody, slowBody] = response.body === null ? [null, null] : intoFastSlowStreams(response.body.getReader());
-
-    const cachePromise = cache.onResponse(
-        requestInfo,
-        method,
-        response.status,
-        requestHeaders,
-        response.headers,
-        requestTime,
-        responseTime,
-        slowBody,
-    );
-
-    if (isRevalidationRequest(cached) && response.status === 304) {
-        await cachePromise;
-
-        const cached = await cache.get(requestInfo, method, requestHeaders);
-        if (isResponse(cached)) {
-            return new Response(cached.body, {
-                status: cached.status,
-                headers: cached.headers,
-            });
-        }
-
-        // To prevent infinite loops, skip cache.
-        return await fetch(requestInfo, {
+    while (true) {
+        const response = await fetch(requestInfo, {
             ...requestInit,
             cache: 'no-store',
-            headers: requestHeaders,
+            headers: revalidationFailed ? requestHeaders : (revalidationHeaders ?? requestHeaders),
+        });
+
+        const responseTime = Date.now();
+
+        const [fastBody, slowBody] = response.body === null ? [null, null] : intoFastSlowStreams(response.body.getReader());
+
+        const cachePromise = cache.onResponse(
+            requestInfo,
+            method,
+            response.status,
+            requestHeaders,
+            response.headers,
+            requestTime,
+            responseTime,
+            slowBody,
+        );
+
+        if (revalidationHeaders && response.status === 304 && !revalidationFailed) {
+            await cachePromise;
+
+            const cached = await cache.get(requestInfo, method, requestHeaders);
+            if (isResponse(cached)) {
+                return new Response(cached.body, {
+                    status: cached.status,
+                    headers: cached.headers,
+                });
+            }
+
+            // Stored response got invalidated
+            revalidationFailed = true;
+            continue;
+        }
+
+        if (requestInit?.waitForCache) {
+            await cachePromise;
+        }
+
+        return new Response(fastBody, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
         });
     }
-
-    if (requestInit?.waitForCache) {
-        await cachePromise;
-    }
-
-    return new Response(fastBody, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-    });
 };
