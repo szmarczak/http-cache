@@ -8,6 +8,7 @@ import { toSafePositiveInteger } from './to-safe-positive-integer.mts';
 // TODO: `clear-site-data: cache`: https://w3c.github.io/webappsec-clear-site-data/#header
 // TODO: content negotiation:      https://www.rfc-editor.org/rfc/rfc9111.html#name-overview-of-cache-operation
 // TODO: fix concurrency write issues
+// TODO: limit large responses
 
 // https://fetch.spec.whatwg.org/#headers-class
 // Urgh, Headers may return null but plain object must not contain null!
@@ -288,7 +289,7 @@ const getLifetimeMs = (
     const expiresDate = Date.parse(expires);
 
     if (Number.isNaN(expiresDate)) {
-        return;
+        return 0;
     }
 
     return Math.max(0, expiresDate - date);
