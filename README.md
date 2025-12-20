@@ -20,7 +20,7 @@ Benchmarks (+/- <1%) on AMD 5600:
 
 ```
 cache.get:        305k req/s
-cache.onResponse: 135k req/s
+cache.onResponse: 130k req/s
 fetch with cache: 145k req/s
 raw refresh:       78k req/s
 fetch refresh:     50k req/s

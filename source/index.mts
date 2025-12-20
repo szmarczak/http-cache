@@ -7,6 +7,7 @@ import { toSafePositiveInteger } from './to-safe-positive-integer.mts';
 // TODO: cache groups:             https://www.rfc-editor.org/rfc/rfc9875.html
 // TODO: `clear-site-data: cache`: https://w3c.github.io/webappsec-clear-site-data/#header
 // TODO: content negotiation:      https://www.rfc-editor.org/rfc/rfc9111.html#name-overview-of-cache-operation
+// TODO: fix concurrency write issues
 
 // https://fetch.spec.whatwg.org/#headers-class
 // Urgh, Headers may return null but plain object must not contain null!
@@ -227,7 +228,8 @@ const canStore = (
         || hasExpires
         || toSafePositiveInteger(responseCacheControl['max-age']) !== undefined
         || (shared && toSafePositiveInteger(responseCacheControl['s-maxage']) !== undefined)
-        || isHeuristicallyCacheableStatusCode(statusCode);
+        || isHeuristicallyCacheableStatusCode(statusCode)
+        || statusCode === 304;
 
     return condition;
 };
@@ -289,13 +291,7 @@ const getLifetimeMs = (
         return;
     }
 
-    const result = expiresDate - date;
-
-    if (result < 0) {
-        return;
-    }
-
-    return result;
+    return Math.max(0, expiresDate - date);
 };
 
 // https://www.rfc-editor.org/rfc/rfc9110.html#field.connection
@@ -345,16 +341,12 @@ const withoutHopByHop = (responseHeaders: WebHeaders): Headers => {
 };
 
 // https://www.rfc-editor.org/rfc/rfc9110#section-6.6.1
-const normalizeDateHeader = (date: string | null, responseTime: number): number => {
+const normalizeDateHeader = (date: string | null, requestTime: number, responseTime: number): number => {
     if (date !== null) {
         const parsed = Date.parse(date);
 
-        if (!Number.isNaN(parsed)) {
-            const now = Date.now();
-
-            if (parsed > responseTime && parsed < now) {
-                return parsed;
-            }
+        if (!Number.isNaN(parsed) && parsed >= requestTime && parsed <= responseTime) {
+            return parsed;
         }
     }
 
@@ -362,7 +354,7 @@ const normalizeDateHeader = (date: string | null, responseTime: number): number 
 };
 
 // https://www.rfc-editor.org/rfc/rfc9110#name-last-modified
-const normalizeLastModified = (rawLastModified: string | null, responseTime: number): number | null => {
+const normalizeLastModified = (rawLastModified: string | null, date: number): number | null => {
     if (rawLastModified === null) {
         return null;
     }
@@ -373,7 +365,7 @@ const normalizeLastModified = (rawLastModified: string | null, responseTime: num
         return null;
     }
 
-    if (lastModified > responseTime) {
+    if (lastModified > date) {
         return null;
     }
 
@@ -397,7 +389,7 @@ const calculateAgeMs = (ageHeader: string | null, date: number, requestTime: num
 };
 
 // https://www.rfc-editor.org/rfc/rfc9111.html#name-freshening-responses-with-h
-const shouldInvalidateCache = (oldMetadata: Metadata, responseHeaders: WebHeaders, lastModified: number | null) => {
+const didMetadataChange = (oldMetadata: Metadata, responseHeaders: WebHeaders, lastModified: number | null): boolean => {
     return oldMetadata.etag !== responseHeaders.get('etag')
         || oldMetadata.lastModified !== lastModified
         || (responseHeaders.has('content-length')   && oldMetadata.responseHeaders['content-length']   !== responseHeaders.get('content-length'))
@@ -722,7 +714,7 @@ export class HttpCache {
         const responseCacheControl = parseCacheControl(responseHeaders.get('cache-control'));
 
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-storing-responses-in-caches
-        const storeable = statusCode === 304 || canStore(
+        const storeable = canStore(
             this.shared,
             method,
             statusCode,
@@ -738,7 +730,7 @@ export class HttpCache {
         }
 
         // The term "date_value" denotes the value of the Date header field, in a form appropriate for arithmetic operations. See Section 6.6.1 of [HTTP] for the definition of the Date header field and for requirements regarding responses without it.
-        const date = normalizeDateHeader(responseHeaders.get('date'), responseTime);
+        const date = normalizeDateHeader(responseHeaders.get('date'), requestTime, responseTime);
 
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-freshness-lifet
         const lifetime = getLifetimeMs(
@@ -754,41 +746,36 @@ export class HttpCache {
             return;
         }
 
-        // https://www.rfc-editor.org/rfc/rfc9110#name-last-modified
-        const lastModified = normalizeLastModified(responseHeaders.get('last-modified'), responseTime);
-
         const metadataKey = getMetadataKey(url);
 
         const oldMetadata = await this.metadataCache.get(metadataKey);
 
-        const tryInvalidate = async () => {
-            if (oldMetadata === undefined || (method === 'GET' && statusCode !== 304)) {
-                return false;
-            }
+        // No stored response to update
+        if (statusCode === 304 && oldMetadata === undefined) {
+            return;
+        }
 
-            if (shouldInvalidateCache(oldMetadata, responseHeaders, lastModified)) {
-                if (oldMetadata.invalidated) {
-                    return true;
-                }
+        // https://www.rfc-editor.org/rfc/rfc9110#name-last-modified
+        const lastModified = normalizeLastModified(responseHeaders.get('last-modified'), date);
 
-                try {
-                    const newMetadata = { ...oldMetadata };
-                    newMetadata.invalidated = true;
-
-                    await this.metadataCache.set(metadataKey, newMetadata);
-                } catch (error: unknown) {
-                    this.#error(error);
-                }
-
-                return true;
-            }
-
-            return false;
-        };
+        const metadataChanged = oldMetadata !== undefined
+            && didMetadataChange(oldMetadata, responseHeaders, lastModified);
 
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-freshening-stored-responses
-        const invalidated = await tryInvalidate();
-        if (invalidated) {
+        if (statusCode === 304 && metadataChanged) {
+            if (oldMetadata.invalidated) {
+                return;
+            }
+
+            try {
+                const newMetadata = { ...oldMetadata };
+                newMetadata.invalidated = true;
+
+                await this.metadataCache.set(metadataKey, newMetadata);
+            } catch (error: unknown) {
+                this.#error(error);
+            }
+
             return;
         }
 
@@ -809,6 +796,37 @@ export class HttpCache {
             responseTime,
         );
 
+        // Should replace body?
+        const replace = (() => {
+            // No stored response
+            if (oldMetadata === undefined) {
+                return true;
+            }
+
+            // Validation successful
+            if (statusCode === 304) {
+                return false;
+            }
+
+            // Freshening with HEAD
+            if (method === 'HEAD') {
+                // Content metadata or validators changed
+                if (metadataChanged) {
+                    return true;
+                }
+
+                // Status code changed
+                if (oldMetadata.statusCode !== statusCode) {
+                    return true;
+                }
+
+                return false;
+            }
+
+            // GET request
+            return true;
+        })();
+
         const metadata: Metadata = {
             id: oldMetadata?.id ?? crypto.randomUUID(),
             responseTime,
@@ -821,9 +839,9 @@ export class HttpCache {
             vary: parseVary(responseHeaders.get('vary'), requestHeaders),
 
             // https://www.rfc-editor.org/rfc/rfc9110#name-methods-and-caching
-            method: oldMetadata?.method ?? method,
+            method: replace ? method : oldMetadata!.method,
             // https://www.rfc-editor.org/rfc/rfc9110.html#name-status-codes
-            statusCode: oldMetadata?.statusCode ?? statusCode,
+            statusCode: replace ? statusCode : oldMetadata!.statusCode,
             // https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-age
             correctedInitialAge,
             // https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-freshness-lifet
@@ -846,7 +864,7 @@ export class HttpCache {
                     );
                 }
 
-                return withoutHopByHop(responseHeaders)
+                return withoutHopByHop(responseHeaders);
             })(),
             // https://www.rfc-editor.org/rfc/rfc9111.html#name-invalidating-stored-respons
             invalidated: false,
@@ -867,12 +885,10 @@ export class HttpCache {
             return;
         }
 
-        const updateBody = statusCode !== 304 && (method !== 'HEAD' || oldMetadata === undefined);
-
         try {
             await Promise.all([
                 this.metadataCache.set(metadataKey, metadata),
-                updateBody ? this.blobCache.set(blobKey, buffer) : undefined,
+                replace ? this.blobCache.set(blobKey, buffer) : undefined,
             ]);
         } catch (error: unknown) {
             await Promise.allSettled([
