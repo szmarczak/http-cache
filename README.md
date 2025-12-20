@@ -19,11 +19,11 @@ This software is work in progress. It needs tests. Indexing and partial content 
 Benchmarks (+/- <1%) on AMD 5600:
 
 ```
-cache.get:        450k req/s
+cache.get:        305k req/s
 cache.onResponse: 135k req/s
-fetch with cache: 130k req/s
-raw refresh:       88k req/s
-fetch refresh:     42k req/s
+fetch with cache: 145k req/s
+raw refresh:       78k req/s
+fetch refresh:     50k req/s
 ```
 
 Legend:
@@ -33,7 +33,7 @@ Legend:
 - raw refresh - clear cache, save to cache, retrieve from cache,
 - fetch refresh - raw refresh but using wrapped fetch.
 
-Note that the raw benchmarks are an upper bound (this is a stress test). In a real application, there's lots of I/O going on, so expect the actual cache performance of at least 42k req/s (130k req/s is an upper bound).
+Note that the raw benchmarks are an upper bound (this is a stress test). In a real application, there's lots of I/O going on, so expect the actual cache performance of at least 50k req/s (145k req/s is an upper bound).
 
 ## Caveats
 

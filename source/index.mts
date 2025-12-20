@@ -1,4 +1,4 @@
-import { parseCacheControl } from './parse-cache-control.mts';
+import { parseCacheControl, type CacheControl } from './parse-cache-control.mts';
 import { intoFastSlowStreams, readNode, readWeb, isNodeReadable, type Readable } from './clone-stream.mts';
 import { toSafePositiveInteger } from './to-safe-positive-integer.mts';
 
@@ -26,9 +26,25 @@ const toWebHeaders = (headers: Headers | WebHeaders): WebHeaders => {
         return headers;
     }
 
+    headers = (() => {
+        const result: Headers = Object.create(null);
+
+        for (const header in headers) {
+            const value = headers[header];
+
+            if (value === undefined) {
+                continue;
+            }
+
+            result[header.toLowerCase()] = value;
+        }
+
+        return result;
+    })();
+
     return {
-        has: (header: string) => header in headers,
-        get: (header: string) => headers[header] ?? null,
+        has: (header: string) => header.toLowerCase() in headers,
+        get: (header: string) => headers[header.toLowerCase()] ?? null,
         keys: function*() {
             for (const key in headers) {
                 yield key;
@@ -172,7 +188,7 @@ const canStore = (
     method: string,
     statusCode: number,
     hasAuthorization: boolean,
-    rawResponseCacheControl: string | null,
+    responseCacheControl: CacheControl,
     hasExpires: boolean,
     vary: string | null,
     forceMustUnderstand: boolean,
@@ -182,9 +198,6 @@ const canStore = (
     if (vary !== null && vary.includes('*')) {
         return false;
     }
-
-    // https://www.rfc-editor.org/rfc/rfc9111.html#name-cache-control
-    const responseCacheControl = parseCacheControl(rawResponseCacheControl);
 
     let condition = isValidStatusCode(statusCode);
 
@@ -223,36 +236,33 @@ const canStore = (
 const getLifetimeMs = (
     shared: boolean,
     expires: string | null,
-    requestCacheControl: string | null,
-    responseCacheControl: string | null,
+    requestCacheControl: CacheControl,
+    responseCacheControl: CacheControl,
     heuristicLifetime: number,
+    date: number,
 ): number | undefined => {
-    // https://www.rfc-editor.org/rfc/rfc9111.html#name-cache-control
-    const parsedRequest = parseCacheControl(requestCacheControl);
-    const parsedResponse = parseCacheControl(responseCacheControl);
-
     // https://www.rfc-editor.org/rfc/rfc9111.html#name-no-store
     // The no-store request directive indicates that a cache MUST NOT store any part of either this request or any response to it.
-    if ('no-store' in parsedRequest) {
+    if ('no-store' in requestCacheControl) {
         return;
     }
 
     // https://www.rfc-editor.org/rfc/rfc9111.html#name-no-store-2
     // The no-store response directive indicates that a cache MUST NOT store any part of either the immediate request or the response and MUST NOT use the response to satisfy any other request.
-    if ('no-store' in parsedResponse) {
+    if ('no-store' in responseCacheControl) {
         return;
     }
 
     // https://www.rfc-editor.org/rfc/rfc9111.html#name-private
     // The unqualified private response directive indicates that a shared cache MUST NOT store the response (i.e., the response is intended for a single user).
-    if (shared && 'private' in parsedResponse) {
+    if (shared && 'private' in responseCacheControl) {
         return;
     }
 
     // https://www.rfc-editor.org/rfc/rfc9111.html#name-s-maxage
     // The s-maxage response directive indicates that, for a shared cache, the maximum age specified by this directive overrides the maximum age specified by either the max-age directive or the Expires header field.
     if (shared) {
-        const sharedMaxAge = toSafePositiveInteger(parsedResponse['s-maxage']);
+        const sharedMaxAge = toSafePositiveInteger(responseCacheControl['s-maxage']);
 
         if (sharedMaxAge !== undefined) {
             return sharedMaxAge * 1000;
@@ -261,11 +271,13 @@ const getLifetimeMs = (
 
     // https://www.rfc-editor.org/rfc/rfc9111.html#name-max-age-2
     // The max-age response directive indicates that the response is to be considered stale after its age is greater than the specified number of seconds.
-    const maxAge = toSafePositiveInteger(parsedResponse['max-age']);
+    const maxAge = toSafePositiveInteger(responseCacheControl['max-age']);
     if (maxAge !== undefined) {
         return maxAge * 1000;
     }
 
+    // https://www.rfc-editor.org/rfc/rfc9111.html#name-expires
+    // Expires is only intended for recipients that have not yet implemented the Cache-Control header field.
     if (expires === null) {
         return heuristicLifetime;
     }
@@ -277,7 +289,13 @@ const getLifetimeMs = (
         return;
     }
 
-    return Math.max(0, expiresDate - Date.now());
+    const result = expiresDate - date;
+
+    if (result < 0) {
+        return;
+    }
+
+    return result;
 };
 
 // https://www.rfc-editor.org/rfc/rfc9110.html#field.connection
@@ -315,7 +333,7 @@ const withoutHopByHop = (responseHeaders: WebHeaders): Headers => {
 
     const connection = responseHeaders.get('connection');
 
-    const hopByHop = connection !== null ? connection.split(',').map(header => header.trim()) : [];
+    const hopByHop = connection?.split(',').map(header => header.trim().toLowerCase()) ?? [];
 
     for (const header of responseHeaders.keys()) {
         if (!isHopByHop(header) && !hopByHop.includes(header) && responseHeaders.has(header)) {
@@ -327,44 +345,45 @@ const withoutHopByHop = (responseHeaders: WebHeaders): Headers => {
 };
 
 // https://www.rfc-editor.org/rfc/rfc9110#section-6.6.1
-const normalizeDateHeader = (date: string | null, requestTime: number): number => {
+const normalizeDateHeader = (date: string | null, responseTime: number): number => {
     if (date !== null) {
         const parsed = Date.parse(date);
 
         if (!Number.isNaN(parsed)) {
             const now = Date.now();
 
-            if (parsed > requestTime && parsed < now) {
+            if (parsed > responseTime && parsed < now) {
                 return parsed;
             }
         }
     }
 
-    return requestTime;
+    return responseTime;
 };
 
 // https://www.rfc-editor.org/rfc/rfc9110#name-last-modified
-const normalizeLastModified = (lastModified: string | null): number | null => {
-    if (lastModified === null) {
+const normalizeLastModified = (rawLastModified: string | null, responseTime: number): number | null => {
+    if (rawLastModified === null) {
         return null;
     }
 
-    const date = Date.parse(lastModified);
+    const lastModified = Date.parse(rawLastModified);
 
-    if (Number.isNaN(date)) {
+    if (Number.isNaN(lastModified)) {
         return null;
     }
 
-    return date;
+    if (lastModified > responseTime) {
+        return null;
+    }
+
+    return lastModified;
 };
 
 // https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-age
-const calculateAgeMs = (ageHeader: string | null, dateHeader: string | null, requestTime: number, responseTime: number): number => {
-    //  The term "age_value" denotes the value of the Age header field (Section 5.1), in a form appropriate for arithmetic operation; or 0, if not available.
+const calculateAgeMs = (ageHeader: string | null, date: number, requestTime: number, responseTime: number): number => {
+    // The term "age_value" denotes the value of the Age header field (Section 5.1), in a form appropriate for arithmetic operation; or 0, if not available.
     const age = (toSafePositiveInteger(ageHeader) ?? 0) * 1000;
-
-    // The term "date_value" denotes the value of the Date header field, in a form appropriate for arithmetic operations. See Section 6.6.1 of [HTTP] for the definition of the Date header field and for requirements regarding responses without it.
-    const date = dateHeader === null ? Date.now() : normalizeDateHeader(dateHeader, requestTime);
 
     // the "apparent_age": response_time minus date_value, if the implementation's clock is reasonably well synchronized to the origin server's clock. If the result is negative, the result is replaced by zero.
     const apparentAge = Math.max(0, responseTime - date);
@@ -378,9 +397,7 @@ const calculateAgeMs = (ageHeader: string | null, dateHeader: string | null, req
 };
 
 // https://www.rfc-editor.org/rfc/rfc9111.html#name-freshening-responses-with-h
-const shouldInvalidateCache = (oldMetadata: Metadata, responseHeaders: WebHeaders) => {
-    const lastModified = normalizeLastModified(responseHeaders.get('last-modified'));
-
+const shouldInvalidateCache = (oldMetadata: Metadata, responseHeaders: WebHeaders, lastModified: number | null) => {
     return oldMetadata.etag !== responseHeaders.get('etag')
         || oldMetadata.lastModified !== lastModified
         || (responseHeaders.has('content-length')   && oldMetadata.responseHeaders['content-length']   !== responseHeaders.get('content-length'))
@@ -525,7 +542,12 @@ export class HttpCache {
     }
 
     // https://www.rfc-editor.org/rfc/rfc9111.html#constructing.responses.from.caches
-    async #get(url: string, method: string, requestHeaders: WebHeaders): Promise<Response | RevalidationRequest | undefined> {
+    async #get(
+        url: string,
+        method: string,
+        requestHeaders: WebHeaders,
+        requestCacheControl: CacheControl,
+    ): Promise<Response | RevalidationRequest | undefined> {
         // https://www.rfc-editor.org/rfc/rfc9110#name-methods-and-caching
         if (method !== 'GET' && method !== 'HEAD') {
             // https://www.rfc-editor.org/rfc/rfc9111.html#invalidation
@@ -576,9 +598,6 @@ export class HttpCache {
         const stale = currentAge - metadata.lifetime;
         const isStale = stale >= 0;
 
-        // https://www.rfc-editor.org/rfc/rfc9111.html#name-cache-control
-        const requestCacheControl = parseCacheControl(requestHeaders.get('cache-control'));
-
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-no-cache
         const alwaysRevalidate = 'no-cache' in requestCacheControl;
 
@@ -589,19 +608,19 @@ export class HttpCache {
             || (this.shared && isStale && metadata.sharedMustRevalidateStale);
 
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-max-stale
-        const maxStale = toSafePositiveInteger(requestCacheControl['max-stale']);
-        const acceptStale = maxStale !== undefined && maxStale >= stale;
+        const maxStale = requestCacheControl['max-stale'] === '' ? Number.POSITIVE_INFINITY : toSafePositiveInteger(requestCacheControl['max-stale']);
+        const acceptStale = maxStale !== undefined && (maxStale * 1000) >= stale;
 
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-min-fresh
         const minFresh = toSafePositiveInteger(requestCacheControl['min-fresh']);
-        const freshEnough = (currentAge + (minFresh ?? 0)) < metadata.lifetime;
+        const freshEnough = (currentAge + (minFresh ?? 0) * 1000) < metadata.lifetime;
 
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-max-age
         const maxAge = toSafePositiveInteger(requestCacheControl['max-age']);
-        const ageOk = maxAge === undefined || (currentAge <= maxAge);
+        const ageOk = maxAge === undefined || (currentAge <= (maxAge * 1000));
 
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-validation
-        if (revalidate || (minFresh !== undefined && freshEnough) || (!ageOk || (isStale && !acceptStale))) {
+        if (revalidate || (minFresh !== undefined && !freshEnough) || (!ageOk || (isStale && !acceptStale))) {
             const revalidationHeaders: Headers = Object.create(null);
 
             // https://www.rfc-editor.org/rfc/rfc9111.html#name-sending-a-validation-reques
@@ -644,7 +663,7 @@ export class HttpCache {
             return;
         }
 
-        const newHeaders = { ...metadata.responseHeaders };
+        const newHeaders = Object.assign(Object.create(null) as Headers, metadata.responseHeaders);
         newHeaders['age'] = String(Math.floor(currentAge / 1000));
 
         return {
@@ -656,18 +675,16 @@ export class HttpCache {
 
     async get(url: string, method: string, requestHeaders: Headers | WebHeaders): Promise<Response | RevalidationRequest | undefined> {
         const headers = toWebHeaders(requestHeaders);
-        const result = await this.#get(url, method, headers);
+        const requestCacheControl = parseCacheControl(headers.get('cache-control'));
 
-        if (result === undefined) {
-            const requestCacheControl = parseCacheControl(headers.get('cache-control'));
+        const result = await this.#get(url, method, headers, requestCacheControl);
 
-            if ('only-if-cached' in requestCacheControl) {
-                return {
-                    body: new Uint8Array(),
-                    status: 504,
-                    headers: Object.create(null),
-                };
-            }
+        if (!isResponse(result) && ('only-if-cached' in requestCacheControl)) {
+            return {
+                body: new Uint8Array(),
+                status: 504,
+                headers: Object.create(null),
+            };
         }
 
         return result;
@@ -691,21 +708,26 @@ export class HttpCache {
             }
         }
 
-        // 206 is not supported
-        if (responseHeaders.has('content-range')) {
+        // Partial content is not supported
+        // https://www.rfc-editor.org/rfc/rfc9110#name-range-requests
+        // https://www.rfc-editor.org/rfc/rfc9110#name-206-partial-content
+        // https://www.rfc-editor.org/rfc/rfc9110#name-content-range
+        // https://www.rfc-editor.org/rfc/rfc9110#name-range
+        if (statusCode === 206 || responseHeaders.has('content-range') || requestHeaders.has('range')) {
             return;
         }
 
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-cache-control
+        const requestCacheControl = parseCacheControl(requestHeaders.get('cache-control'));
         const responseCacheControl = parseCacheControl(responseHeaders.get('cache-control'));
 
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-storing-responses-in-caches
-        const storeable = canStore(
+        const storeable = statusCode === 304 || canStore(
             this.shared,
             method,
             statusCode,
-            responseHeaders.has('authorization'),
-            responseHeaders.get('cache-control'),
+            requestHeaders.has('authorization'),
+            responseCacheControl,
             responseHeaders.has('expires'),
             responseHeaders.get('vary'),
             this.forceMustUnderstand,
@@ -715,29 +737,25 @@ export class HttpCache {
             return;
         }
 
+        // The term "date_value" denotes the value of the Date header field, in a form appropriate for arithmetic operations. See Section 6.6.1 of [HTTP] for the definition of the Date header field and for requirements regarding responses without it.
+        const date = normalizeDateHeader(responseHeaders.get('date'), responseTime);
+
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-freshness-lifet
         const lifetime = getLifetimeMs(
             this.shared,
             responseHeaders.get('expires'),
-            requestHeaders.get('cache-control'),
-            responseHeaders.get('cache-control'),
+            requestCacheControl,
+            responseCacheControl,
             this.heuristicLifetime,
+            date,
         );
 
         if (lifetime === undefined) {
             return;
         }
 
-        // https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-age
-        const correctedInitialAge = calculateAgeMs(
-            responseHeaders.get('age'),
-            responseHeaders.get('date'),
-            requestTime,
-            responseTime,
-        );
-
         // https://www.rfc-editor.org/rfc/rfc9110#name-last-modified
-        const lastModified = normalizeLastModified(responseHeaders.get('last-modified'));
+        const lastModified = normalizeLastModified(responseHeaders.get('last-modified'), responseTime);
 
         const metadataKey = getMetadataKey(url);
 
@@ -748,7 +766,7 @@ export class HttpCache {
                 return false;
             }
 
-            if (shouldInvalidateCache(oldMetadata, responseHeaders)) {
+            if (shouldInvalidateCache(oldMetadata, responseHeaders, lastModified)) {
                 if (oldMetadata.invalidated) {
                     return true;
                 }
@@ -775,9 +793,21 @@ export class HttpCache {
         }
 
         // Do not refresh heuristically cacheable responses on HEAD
-        if (method === 'HEAD' && oldMetadata?.method === 'GET' && !responseHeaders.has('if-none-match') && !responseHeaders.has('if-modified-since')) {
+        if (   method === 'HEAD'
+            && oldMetadata?.method === 'GET'
+            && !requestHeaders.has('if-none-match')
+            && !requestHeaders.has('if-modified-since')
+        ) {
             return;
         }
+
+        // https://www.rfc-editor.org/rfc/rfc9111.html#name-calculating-age
+        const correctedInitialAge = calculateAgeMs(
+            responseHeaders.get('age'),
+            date,
+            requestTime,
+            responseTime,
+        );
 
         const metadata: Metadata = {
             id: oldMetadata?.id ?? crypto.randomUUID(),
@@ -805,14 +835,30 @@ export class HttpCache {
             // https://www.rfc-editor.org/rfc/rfc9111.html#name-no-cache-2
             alwaysRevalidate: 'no-cache' in responseCacheControl,
             // https://www.rfc-editor.org/rfc/rfc9111.html#name-storing-header-and-trailer-
-            responseHeaders: withoutHopByHop(responseHeaders),
+            responseHeaders: (() => {
+                if (statusCode === 304) {
+                    return Object.assign(
+                            Object.assign(
+                                Object.create(null) as Headers,
+                                oldMetadata?.responseHeaders
+                            ),
+                            withoutHopByHop(responseHeaders),
+                    );
+                }
+
+                return withoutHopByHop(responseHeaders)
+            })(),
             // https://www.rfc-editor.org/rfc/rfc9111.html#name-invalidating-stored-respons
             invalidated: false,
         };
 
         const blobKey = getBlobKey(metadata.id, url);
 
+        // https://www.rfc-editor.org/rfc/rfc9110#name-head
+        // https://www.rfc-editor.org/rfc/rfc9110#name-204-no-content
         // https://www.rfc-editor.org/rfc/rfc9110#name-304-not-modified
+        // The HEAD method is identical to GET except that the server MUST NOT send content in the response.
+        // A 204 response is terminated by the end of the header section; it cannot contain content or trailers.
         // A 304 response is terminated by the end of the header section; it cannot contain content or trailers.
         const noContent = stream === null || method === 'HEAD' || statusCode === 204 || statusCode === 304;
 
@@ -821,10 +867,12 @@ export class HttpCache {
             return;
         }
 
+        const updateBody = statusCode !== 304 && (method !== 'HEAD' || oldMetadata === undefined);
+
         try {
             await Promise.all([
                 this.metadataCache.set(metadataKey, metadata),
-                statusCode === 304 ? undefined : this.blobCache.set(blobKey, buffer),
+                updateBody ? this.blobCache.set(blobKey, buffer) : undefined,
             ]);
         } catch (error: unknown) {
             await Promise.allSettled([

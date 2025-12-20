@@ -14,7 +14,7 @@ type MutableCacheControl = {
     's-maxage'?: string,
 };
 
-type CacheControl = Readonly<MutableCacheControl>;
+export type CacheControl = Readonly<MutableCacheControl>;
 
 // https://www.rfc-editor.org/rfc/rfc9111.html#name-cache-control
 export const parseCacheControl = (cacheControl: string | null): CacheControl => {
