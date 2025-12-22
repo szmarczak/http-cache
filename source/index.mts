@@ -1,6 +1,9 @@
-import { parseCacheControl, type CacheControl } from './parse-cache-control.mts';
-import { intoFastSlowStreams, readNode, readWeb, isNodeReadable, type Readable } from './clone-stream.mts';
+import type { PlainHeaders, NodeHeaders, WebHeaders } from './web-headers.mts';
+import type { CacheControl } from './parse-cache-control.mts';
 import { toSafePositiveInteger } from './to-safe-positive-integer.mts';
+import { intoFastSlowStreams, readWeb } from './clone-stream.mts';
+import { parseCacheControl } from './parse-cache-control.mts';
+import { toWebHeaders } from './web-headers.mts';
 
 // Good arguments against cacheable QUERY (or QUERY at all): https://datatracker.ietf.org/doc/review-ietf-httpbis-safe-method-w-body-11-httpdir-early-fielding-2025-06-20/
 
@@ -8,52 +11,8 @@ import { toSafePositiveInteger } from './to-safe-positive-integer.mts';
 // TODO: `clear-site-data: cache`: https://w3c.github.io/webappsec-clear-site-data/#header
 // TODO: content negotiation:      https://www.rfc-editor.org/rfc/rfc9111.html#name-overview-of-cache-operation
 // TODO: fix concurrency write issues
-// TODO: limit large responses
 
-// https://fetch.spec.whatwg.org/#headers-class
-// Urgh, Headers may return null but plain object must not contain null!
-type WebHeaders = {
-    has(header: string): boolean,
-    get(header: string): string | null,
-    keys(): Iterable<string>,
-};
-
-const isWebHeaders = (headers: Headers | WebHeaders): headers is WebHeaders =>
-       typeof headers.has === 'function'
-    && typeof headers.get === 'function'
-    && typeof headers.keys === 'function';
-
-const toWebHeaders = (headers: Headers | WebHeaders): WebHeaders => {
-    if (isWebHeaders(headers)) {
-        return headers;
-    }
-
-    headers = (() => {
-        const result: Headers = Object.create(null);
-
-        for (const header in headers) {
-            const value = headers[header];
-
-            if (value === undefined) {
-                continue;
-            }
-
-            result[header.toLowerCase()] = value;
-        }
-
-        return result;
-    })();
-
-    return {
-        has: (header: string) => header.toLowerCase() in headers,
-        get: (header: string) => headers[header.toLowerCase()] ?? null,
-        keys: function*() {
-            for (const key in headers) {
-                yield key;
-            }
-        },
-    };
-};
+type AsyncDisposableAsyncIterable<T, TReturn = any, TNext = any> = AsyncIterable<T, TReturn, TNext> & AsyncDisposable;
 
 // https://www.rfc-editor.org/rfc/rfc9111.html#name-storing-header-and-trailer-
 // The "cache key" is the information a cache uses to choose a response and is composed from, at a minimum, the request method and target URI used to retrieve the stored response
@@ -305,19 +264,14 @@ const isHopByHop = (header: string): header is HopByHop =>
         || header === 'proxy-authentication-info';
 
 // Fetch-like
-export type Headers = {
-    [header: string]: string,
-};
-
-// Fetch-like
 export type Response = {
     body: Uint8Array<ArrayBuffer> | null,
     status: number,
-    headers: Headers,
+    headers: PlainHeaders,
 };
 
 export type RevalidationRequest = {
-    revalidationHeaders: Headers,
+    revalidationHeaders: PlainHeaders,
 };
 
 // https://www.rfc-editor.org/rfc/rfc9111.html#name-storing-header-and-trailer-
@@ -325,8 +279,8 @@ export type RevalidationRequest = {
 // [...]
 // Header fields that are specific to the proxy that a cache uses when forwarding a request MUST NOT be stored, unless the cache incorporates the identity of the proxy into the cache key.
 // Effectively, this is limited to Proxy-Authenticate (Section 11.7.1 of [HTTP]), Proxy-Authentication-Info (Section 11.7.3 of [HTTP]), and Proxy-Authorization (Section 11.7.2 of [HTTP]).
-const withoutHopByHop = (responseHeaders: WebHeaders): Headers => {
-    const headers: Headers = Object.create(null);
+const withoutHopByHop = (responseHeaders: WebHeaders): PlainHeaders => {
+    const headers: PlainHeaders = Object.create(null);
 
     const connection = responseHeaders.get('connection');
 
@@ -452,7 +406,7 @@ type Metadata = Readonly<{
     // https://www.rfc-editor.org/rfc/rfc9111.html#name-no-cache-2
     alwaysRevalidate: boolean,
     // https://www.rfc-editor.org/rfc/rfc9111.html#name-storing-header-and-trailer-
-    responseHeaders: Headers,
+    responseHeaders: PlainHeaders,
     // https://www.rfc-editor.org/rfc/rfc9111.html#name-invalidating-stored-respons
     invalidated: boolean,
 }>;
@@ -483,6 +437,8 @@ export class HttpCache {
     readonly shared: boolean = true;
     readonly forceMustUnderstand: boolean = false;
     readonly heuristicLifetime: number = 60 * 1000;
+
+    readonly byteLimit: number = 1024 * 1024;
 
     error: unknown;
 
@@ -614,7 +570,7 @@ export class HttpCache {
 
         // https://www.rfc-editor.org/rfc/rfc9111.html#name-validation
         if (revalidate || (minFresh !== undefined && !freshEnough) || (!ageOk || (isStale && !acceptStale))) {
-            const revalidationHeaders: Headers = Object.create(null);
+            const revalidationHeaders: PlainHeaders = Object.create(null);
 
             // https://www.rfc-editor.org/rfc/rfc9111.html#name-sending-a-validation-reques
             let canRevalidate = false;
@@ -656,7 +612,7 @@ export class HttpCache {
             return;
         }
 
-        const newHeaders = Object.assign(Object.create(null) as Headers, metadata.responseHeaders);
+        const newHeaders = Object.assign(Object.create(null) as PlainHeaders, metadata.responseHeaders);
         newHeaders['age'] = String(Math.floor(currentAge / 1000));
 
         return {
@@ -666,7 +622,7 @@ export class HttpCache {
         };
     }
 
-    async get(url: string, method: string, requestHeaders: Headers | WebHeaders): Promise<Response | RevalidationRequest | undefined> {
+    async get(url: string, method: string, requestHeaders: PlainHeaders | NodeHeaders | WebHeaders): Promise<Response | RevalidationRequest | undefined> {
         const headers = toWebHeaders(requestHeaders);
         const requestCacheControl = parseCacheControl(headers.get('cache-control'));
 
@@ -691,15 +647,9 @@ export class HttpCache {
         responseHeaders: WebHeaders,
         requestTime: number,
         responseTime: number,
-        stream: Readable | ReadableStream<Uint8Array> | null,
+        disposableStream: AsyncDisposableAsyncIterable<Uint8Array> | null,
     ): Promise<void> {
-        if (stream !== null) {
-            const readableDidRead = 'readableDidRead' in stream && stream.readableDidRead;
-            if (readableDidRead) {
-                this.#error(new Error('Cannot cache response: stream emitted data already'));
-                return;
-            }
-        }
+        await using stream = disposableStream;
 
         // Partial content is not supported
         // https://www.rfc-editor.org/rfc/rfc9110#name-range-requests
@@ -858,7 +808,7 @@ export class HttpCache {
                 if (statusCode === 304) {
                     return Object.assign(
                             Object.assign(
-                                Object.create(null) as Headers,
+                                Object.create(null) as PlainHeaders,
                                 oldMetadata?.responseHeaders
                             ),
                             withoutHopByHop(responseHeaders),
@@ -881,7 +831,7 @@ export class HttpCache {
         // A 304 response is terminated by the end of the header section; it cannot contain content or trailers.
         const noContent = stream === null || method === 'HEAD' || statusCode === 204 || statusCode === 304;
 
-        const buffer = noContent ? null : (isNodeReadable(stream) ? await readNode(stream) : await readWeb(stream));
+        const buffer = noContent ? null : await readWeb(stream, this.byteLimit);
         if (buffer === undefined) {
             return;
         }
@@ -905,11 +855,11 @@ export class HttpCache {
         url: string,
         method: string,
         statusCode: number,
-        requestHeaders: Headers | WebHeaders,
-        responseHeaders: Headers | WebHeaders,
+        requestHeaders: PlainHeaders | NodeHeaders | WebHeaders,
+        responseHeaders: PlainHeaders | NodeHeaders | WebHeaders,
         requestTime: number,
         responseTime: number,
-        stream: Readable | ReadableStream<Uint8Array> | null,
+        stream: AsyncDisposableAsyncIterable<Uint8Array> | null,
     ): Promise<void> {
         return this.#onResponse(
             url,

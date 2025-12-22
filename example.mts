@@ -6,6 +6,11 @@ const aBytes = await a.bytes();
 // Required for demo: cache is asynchronous
 await Promise.resolve();
 
+if (!storage.has('https://szmarczak.com')) {
+    console.error('[panic] Not cached after 1 tick');
+    process.exit();
+}
+
 const b = await f('https://szmarczak.com');
 const bBytes = await b.bytes();
 

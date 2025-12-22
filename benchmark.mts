@@ -23,6 +23,17 @@ const response = new Response('Hello, world!', {
     },
 });
 
+const toAsyncDisposable = <T extends AsyncIterable<Uint8Array>>(body: T | null) => {
+    if (body === null) {
+        return null;
+    }
+
+    return {
+        [Symbol.asyncIterator]: () => response.body![Symbol.asyncIterator](),
+        [Symbol.asyncDispose]: () => response.body!.cancel(),
+    };
+};
+
 await cache.onResponse(
     request.url,
     request.method,
@@ -31,7 +42,7 @@ await cache.onResponse(
     response.headers,
     requestTime,
     responseTime,
-    response.body,
+    toAsyncDisposable(response.body),
 );
 
 console.log(storage.get('https://example/'));
@@ -72,7 +83,7 @@ for (let i = 0; i < warmup; i += 1) {
             response.headers,
             requestTime,
             responseTime,
-            response.body,
+            toAsyncDisposable(response.body),
         );
     }
 
@@ -115,7 +126,7 @@ for (let i = 0; i < warmup; i += 1) {
             response.headers,
             requestTime,
             responseTime,
-            response.body
+            toAsyncDisposable(response.body),
         );
 
         const result = await cache.get(request.url, request.method, request.headers);
@@ -144,7 +155,7 @@ for (let i = 0; i < warmup; i += 1) {
             response.headers,
             requestTime,
             responseTime,
-            response.body
+            toAsyncDisposable(response.body),
         );
 
         const result = await f(request.url, { cache });

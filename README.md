@@ -8,7 +8,7 @@ Pull Requests with artificially generated code are rejected.
 Deprecated functionality is not implemented and will never be.
 
 Works with runtimes implementing either [Node Stream API](https://nodejs.org/api/stream.html#class-streamreadable) or [Web Stream API](https://streams.spec.whatwg.org/).
-Requires [`crypto.randomUUID`](https://w3c.github.io/webcrypto/#Crypto-method-randomUUID) and [`Promise.withResolvers`](https://tc39.es/ecma262/multipage/control-abstraction-objects.html#sec-promise.withResolvers).
+Requires [`crypto.randomUUID`](https://w3c.github.io/webcrypto/#Crypto-method-randomUUID), [`Promise.withResolvers`](https://tc39.es/ecma262/multipage/control-abstraction-objects.html#sec-promise.withResolvers) and [`using`](https://tc39.es/proposal-async-explicit-resource-management/#prod-UsingDeclaration).
 
 ## This software is work in progress
 
@@ -19,11 +19,11 @@ This software is work in progress. It needs tests. Indexing and partial content 
 Benchmarks (+/- <1%) on AMD 5600:
 
 ```
-cache.get:        305k req/s
-cache.onResponse: 130k req/s
-fetch with cache: 145k req/s
-raw refresh:       78k req/s
-fetch refresh:     50k req/s
+cache.get:        310k req/s
+cache.onResponse: 112k req/s
+fetch with cache: 150k req/s
+raw refresh:       72k req/s
+fetch refresh:     46k req/s
 ```
 
 Legend:
@@ -33,7 +33,7 @@ Legend:
 - raw refresh - clear cache, save to cache, retrieve from cache,
 - fetch refresh - raw refresh but using wrapped fetch.
 
-Note that the raw benchmarks are an upper bound (this is a stress test). In a real application, there's lots of I/O going on, so expect the actual cache performance of at least 50k req/s (145k req/s is an upper bound).
+Note that the raw benchmarks are an upper bound (this is a stress test). In a real application, there's lots of I/O going on, so expect the actual cache performance of at least 46k req/s (150k req/s is an upper bound).
 
 ## Caveats
 
@@ -70,8 +70,9 @@ See `fetch.mts` and `example.mts`.
 Requires the following types:
 - `ReadableStream`
 - `ReadableStreamDefaultReader`
+- `ReadableStreamReadResult`
 - `ReadableByteStreamController`
 
-In this case they are pulled from `@types/node`.
+In this case they are pulled from `@types/node`. In the future we could embed those so we don't have to rely on `@types/node`.
 
 `allowImportingTsExtensions` should be set to `true` in `tsconfig.json`. This allows Node to run in [watch mode](https://nodejs.org/docs/latest-v25.x/api/cli.html#--watch) with [erasable TypeScript syntax](https://nodejs.org/en/learn/typescript/run-natively).

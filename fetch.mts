@@ -62,7 +62,10 @@ export const f = async (requestInfo: string, requestInit?: HttpCacheRequestInit)
             response.headers,
             requestTime,
             responseTime,
-            slowBody,
+            slowBody === null ? null : {
+                [Symbol.asyncIterator]: () => slowBody[Symbol.asyncIterator](),
+                [Symbol.asyncDispose]: () => slowBody.cancel(),
+            },
         );
 
         if (revalidationHeaders && response.status === 304 && !revalidationFailed) {
