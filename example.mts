@@ -3,7 +3,7 @@ import { f, storage, isFromCache } from './fetch.mts';
 const a = await f('https://szmarczak.com');
 const aBytes = await a.bytes();
 
-// Required for demo: cache is asynchronous
+// Required for demo: readWeb resolved but #onResponse hasn't resumed yet because we resume first
 await Promise.resolve();
 
 if (!storage.has('https://szmarczak.com')) {

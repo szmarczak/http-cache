@@ -35,11 +35,12 @@ const req = request(url, {
     });
 
     res.once('end', async () => {
-        await Promise.resolve();
+        // The following is for demo only. Do not use artificial delays in production.
+        await Promise.resolve(); // readWeb resolves (for await) after this resolve because we got 'end' first
+        await Promise.resolve(); // readWeb resolved, but because we resumed first, #onResponse hasn't resumed yet
+        await Promise.resolve(); // FIN
 
-        // Two additional ticks required for Node
-        await Promise.resolve();
-        await Promise.resolve();
+        // Instead, await cache.onResponse(...) - you will save 1 event loop microtask.
 
         if (!storage.has(url)) {
             throw 'missing response in cache';
