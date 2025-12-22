@@ -449,10 +449,12 @@ export class HttpCache {
             shared,
             forceMustUnderstand,
             heuristicLifetime,
+            byteLimit,
         }: {
             shared?: boolean,
             forceMustUnderstand?: boolean,
             heuristicLifetime?: number,
+            byteLimit?: number,
         } = Object.create(null),
     ) {
         this.metadataCache = metadataCache;
@@ -461,6 +463,7 @@ export class HttpCache {
         shared !== undefined && (this.shared = shared);
         forceMustUnderstand !== undefined && (this.forceMustUnderstand = forceMustUnderstand);
         heuristicLifetime !== undefined && (this.heuristicLifetime = heuristicLifetime);
+        byteLimit !== undefined && (this.byteLimit = byteLimit);
     }
 
     onError(error: unknown): void {
