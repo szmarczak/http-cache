@@ -169,6 +169,8 @@ export const nodeReadableToSlowDisposableIterable = (stream: Readable, EventEmit
 
             cleanup();
 
+            buffer.length = 0;
+
             buffer.push({
                 isError: true,
                 error: undefined,
